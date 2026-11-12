@@ -287,27 +287,7 @@ fun PocketBookmarkViewerPage(
     val effectiveMediaList = remember(
         sanitizedStack, showSvg, showVideos, showStreams, showPng, showGif, minWidth, minHeight, minSizeKb
     ) {
-        if (sanitizedStack.items.isNotEmpty()) {
-            sanitizedStack.items
-        } else {
-            val previewUrl = sanitizedStack.previewImageUrl.ifBlank {
-                stack.previewImageUrl.ifBlank {
-                    stack.items.firstOrNull()?.sourceUrl ?: ""
-                }
-            }
-            if (previewUrl.isNotBlank()) {
-                val previewItem = MediaInboxItem(
-                    id = "preview_${sanitizedStack.id}",
-                    title = sanitizedStack.title.ifBlank { "Browser Preview" },
-                    localUri = "",
-                    sourceUrl = previewUrl,
-                    isVideo = false
-                )
-                listOf(previewItem)
-            } else {
-                emptyList()
-            }
-        }
+        sanitizedStack.items
     }
 
     var currentIndex by remember(stack.id) { mutableIntStateOf(0) }
@@ -852,23 +832,33 @@ fun PocketBookmarkViewerPage(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.Center
                             ) {
+                                val isDeepScanning = activeDeepScanId == stack.id
                                 Surface(
                                     shape = CircleShape,
                                     color = if (isDark) Color(0xFF26242C) else Color(0xFFEDE8F0),
                                     modifier = Modifier.size(56.dp)
                                 ) {
                                     Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = Icons.Default.Tune,
-                                            contentDescription = null,
-                                            tint = secondaryText,
-                                            modifier = Modifier.size(28.dp)
-                                        )
+                                        if (isDeepScanning) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(28.dp),
+                                                strokeWidth = 2.dp,
+                                                color = textColor,
+                                                trackColor = textColor.copy(alpha = 0.15f)
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = if (stack.items.isEmpty()) Icons.Default.Radar else Icons.Default.Tune,
+                                                contentDescription = null,
+                                                tint = secondaryText,
+                                                modifier = Modifier.size(28.dp)
+                                            )
+                                        }
                                     }
                                 }
                                 Spacer(Modifier.height(16.dp))
                                 Text(
-                                    text = "No matching media",
+                                    text = if (isDeepScanning) "Scanning page in background..." else if (stack.items.isEmpty()) "No media captured yet" else "No matching media",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
                                     color = textColor,
@@ -876,7 +866,9 @@ fun PocketBookmarkViewerPage(
                                 )
                                 Spacer(Modifier.height(6.dp))
                                 Text(
-                                    text = "All site media were excluded by active size, dimension, or format filters.",
+                                    text = if (isDeepScanning) "Running background WebView to capture all photos, videos, and streams..."
+                                           else if (stack.items.isEmpty()) "Tap the radar button in the toolbar above to scan and capture all media from this page."
+                                           else "All site media were excluded by active size, dimension, or format filters.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = secondaryText,
                                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -1458,9 +1450,8 @@ private fun BookmarkDeckCardContent(
                     if (isFront && item != null) {
                         val pocketRepo = remember { PocketRepository.getInstance(context) }
                         val resolvedBytes = remember(item) { pocketRepo.resolveItemSizeBytes(item) }
-                        val isPreviewFallback = item.id.startsWith("preview_")
                         val sizeFormatted = if (resolvedBytes > 0L) " · " + formatBytes(resolvedBytes) else ""
-                        val formatTag = if (isPreviewFallback) "BROWSER PREVIEW" else item.format.ifBlank { if (isCurrentVideo) "VIDEO" else "IMAGE" }
+                        val formatTag = item.format.ifBlank { if (isCurrentVideo) "VIDEO" else "IMAGE" }
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = Color.Black.copy(alpha = 0.65f),

@@ -186,4 +186,27 @@ class BookmarkDetailDownloadActivityTest {
         assertTrue("Must contain the explainer video", savedBookmark?.items?.any { it.isVideo && it.sourceUrl.contains("explainer.mp4") } == true)
         assertEquals("Preview image should automatically resolve from fetched media", "https://news.example.com/images/hero.jpg", savedBookmark?.previewImageUrl)
     }
+
+    @Test
+    fun testBookmarkDoesNotSynthesizeFakePreviewItemWhenItemsEmpty() {
+        val pocketRepo = PocketRepository.getInstance(context)
+
+        val bookmark = pocketRepo.addBookmark(
+            title = "Article Without Media",
+            url = "https://news.example.com/no-media",
+            domain = "news.example.com",
+            description = "Text article",
+            previewImageUrl = "",
+            autoFetchMetadata = false,
+            initialItems = emptyList()
+        )
+
+        val savedBookmark = pocketRepo.bookmarks.value.firstOrNull { it.id == bookmark.id }
+        assertNotNull(savedBookmark)
+        assertTrue("Bookmark items must remain empty without fake preview items", savedBookmark?.items?.isEmpty() == true)
+
+        val sanitized = pocketRepo.sanitizeStack(savedBookmark!!)
+        assertTrue("Sanitized items must be empty when no real media is present", sanitized.items.isEmpty())
+        assertTrue("No synthetic preview item ID should exist", sanitized.items.none { it.id.startsWith("preview_") || it.id.startsWith("media_preview_") })
+    }
 }

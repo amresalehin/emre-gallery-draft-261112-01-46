@@ -193,6 +193,13 @@ object PocketDeepScanEngine {
             // Software layer for background DOM scraping avoids missing GPU rendernode crashes in emulators
             layoutParams = ViewGroup.LayoutParams(1080, 1920)
             setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+            runCatching {
+                measure(
+                    android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                )
+                layout(0, 0, 1080, 1920)
+            }
 
             settings.apply {
                 javaScriptEnabled = true
@@ -351,13 +358,32 @@ object PocketDeepScanEngine {
                     }
                 }
 
-                // 5. Performance resource entries for recently fetched media
+                // 5. OpenGraph & Twitter Card media elements
+                var metas = document.querySelectorAll('meta[property*="image"], meta[name*="image"], meta[property*="video"], meta[name*="video"]');
+                for (var m = 0; m < metas.length; m++) {
+                    var mContent = metas[m].getAttribute('content');
+                    var mProp = (metas[m].getAttribute('property') || metas[m].getAttribute('name') || '').toLowerCase();
+                    var isV = mProp.indexOf('video') !== -1;
+                    if (mContent) add(mContent, 'Page Media', isV);
+                }
+
+                // 6. Direct media anchor links
+                var links = document.querySelectorAll('a[href]');
+                for (var l = 0; l < links.length; l++) {
+                    var href = links[l].getAttribute('href');
+                    if (href && href.match(/\.(jpe?g|png|webp|avif|gif|bmp|svg|mp4|webm|mov|m3u8|mpd|mp3|m4a|aac|flac)(\?.*)?$/i)) {
+                        var isVidLink = !!href.match(/\.(mp4|webm|mov|m3u8|mpd)(\?.*)?$/i);
+                        add(href, links[l].innerText || 'Linked Media', isVidLink);
+                    }
+                }
+
+                // 7. Performance resource entries for recently fetched media
                 try {
                     if (window.performance && typeof window.performance.getEntriesByType === 'function') {
                         var resources = window.performance.getEntriesByType('resource');
                         for (var r = 0; r < resources.length; r++) {
                             var rUrl = resources[r].name;
-                            if (rUrl && rUrl.match(/\.(jpe?g|png|webp|avif|gif|mp4|webm|m3u8|mpd)(\?.*)?$/i)) {
+                            if (rUrl && rUrl.match(/\.(jpe?g|png|webp|avif|gif|mp4|webm|m3u8|mpd|mp3|m4a|aac)(\?.*)?$/i)) {
                                 var isV = !!rUrl.match(/\.(mp4|webm|m3u8|mpd)(\?.*)?$/i);
                                 add(rUrl, 'Resource Stream', isV);
                             }
@@ -399,14 +425,19 @@ object PocketDeepScanEngine {
                 }
                 val isVideo = obj.optBoolean("isVideo", false)
                 val isStream = resolvedUrl.contains(".m3u8", ignoreCase = true) || resolvedUrl.contains(".mpd", ignoreCase = true)
+                val isAudio = resolvedUrl.contains(".mp3", ignoreCase = true) || resolvedUrl.contains(".aac", ignoreCase = true) ||
+                        resolvedUrl.contains(".ogg", ignoreCase = true) || resolvedUrl.contains(".wav", ignoreCase = true) ||
+                        resolvedUrl.contains(".m4a", ignoreCase = true)
                 val format = when {
                     isStream -> "M3U8"
                     resolvedUrl.contains(".webm", ignoreCase = true) -> "WEBM"
                     isVideo || resolvedUrl.contains(".mp4", ignoreCase = true) -> "MP4"
+                    isAudio -> "AUDIO"
                     resolvedUrl.contains(".png", ignoreCase = true) -> "PNG"
                     resolvedUrl.contains(".gif", ignoreCase = true) -> "GIF"
                     resolvedUrl.contains(".webp", ignoreCase = true) -> "WEBP"
                     resolvedUrl.contains(".svg", ignoreCase = true) -> "SVG"
+                    resolvedUrl.contains(".avif", ignoreCase = true) -> "AVIF"
                     else -> "JPEG"
                 }
 
@@ -417,6 +448,7 @@ object PocketDeepScanEngine {
                         localUri = "",
                         sourceUrl = resolvedUrl,
                         isVideo = isVideo || isStream,
+                        isAudio = isAudio,
                         isStream = isStream,
                         format = format,
                         dateAddedMillis = System.currentTimeMillis()

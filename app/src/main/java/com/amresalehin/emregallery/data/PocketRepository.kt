@@ -684,13 +684,16 @@ class PocketRepository(
 
         if (autoFetchMetadata && cleanUrl.isNotBlank()) {
             fetchAndApplyMetadata(bookmark.id, cleanUrl)
+            if (!isMedia) {
+                startDeepScan(bookmark.id, context)
+            }
         }
 
         return bookmark
     }
 
     /**
-     * Automatically fetches metadata (title, description, preview image, and site media) for a bookmark and updates it.
+     * Automatically fetches metadata (title, description, and site media) for a bookmark and updates it.
      */
     fun fetchAndApplyMetadata(bookmarkId: String, url: String = "") {
         if (!activeExtractions.add(bookmarkId)) return
@@ -711,7 +714,6 @@ class PocketRepository(
 
                 val newTitle = if (isTitleDefault && meta.title.isNotBlank()) meta.title else latest.title
                 val newDesc = if (latest.description.isBlank() && meta.description.isNotBlank()) meta.description else latest.description
-                val newPreview = if (latest.previewImageUrl.isBlank() && meta.previewImageUrl.isNotBlank()) meta.previewImageUrl else latest.previewImageUrl
                 val newDomain = if (latest.sourceDomain.isBlank() && meta.domain.isNotBlank()) meta.domain else latest.sourceDomain
 
                 val newItems = if (latest.items.isEmpty() && meta.mediaItems.isNotEmpty()) {
@@ -722,18 +724,16 @@ class PocketRepository(
                     } else {
                         latest.items
                     }
-                } else if (newPreview.isNotBlank()) {
-                    listOf(
-                        MediaInboxItem(
-                            id = "media_preview_${latest.id}",
-                            title = newTitle,
-                            localUri = "",
-                            sourceUrl = newPreview,
-                            isVideo = false
-                        )
-                    )
                 } else {
                     emptyList()
+                }
+
+                val newPreview = if (newItems.isNotEmpty()) {
+                    newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                        ?: newItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
+                        ?: latest.previewImageUrl
+                } else {
+                    latest.previewImageUrl
                 }
 
                 if (newTitle != latest.title || newDesc != latest.description || newPreview != latest.previewImageUrl ||
@@ -850,7 +850,7 @@ class PocketRepository(
      * Starts an on-demand hardware-accelerated deep scan for a bookmark.
      * Capped at 30 seconds with automatic scroll and real-time incremental media discovery.
      */
-    fun startDeepScan(bookmarkId: String, context: Context) {
+    fun startDeepScan(bookmarkId: String, context: Context = this.context) {
         val target = _bookmarks.value.find { it.id == bookmarkId } ?: return
         if (target.sourceUrl.isBlank()) return
 

@@ -567,64 +567,26 @@ fun DirectBrowserView(
                             )
                         }
 
-                        fun saveBookmarkWithDetails(previewImg: String, pageDesc: String) {
-                            val resolvedPreview = previewImg.ifBlank {
-                                alreadyFetchedMediaItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
-                                    ?: alreadyFetchedMediaItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
-                                    ?: ""
-                            }
-                            pocketRepo.addBookmark(
-                                title = effectiveTitle,
-                                url = currentUrl,
-                                description = pageDesc,
-                                previewImageUrl = resolvedPreview,
-                                autoFetchMetadata = true,
-                                initialItems = alreadyFetchedMediaItems
-                            )
-                            val count = alreadyFetchedMediaItems.size
-                            val message = if (count > 0) {
-                                "Saved to Pocket ($count media)"
-                            } else {
-                                "Saved to Pocket"
-                            }
-                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                        }
+                        // Save bookmark to Pocket directly without preview saving
+                        val bookmark = pocketRepo.addBookmark(
+                            title = effectiveTitle,
+                            url = currentUrl,
+                            description = "",
+                            previewImageUrl = "",
+                            autoFetchMetadata = true,
+                            initialItems = alreadyFetchedMediaItems
+                        )
 
-                        webViewInstance?.evaluateJavascript(
-                            """
-                            (function() {
-                                try {
-                                    var ogImg = document.querySelector('meta[property="og:image"]')?.content ||
-                                                document.querySelector('meta[name="og:image"]')?.content ||
-                                                document.querySelector('meta[name="twitter:image"]')?.content ||
-                                                document.querySelector('link[rel="apple-touch-icon"]')?.href || '';
-                                    var ogDesc = document.querySelector('meta[property="og:description"]')?.content ||
-                                                 document.querySelector('meta[name="description"]')?.content || '';
-                                    return JSON.stringify({ image: ogImg, desc: ogDesc });
-                                } catch(e) {
-                                    return JSON.stringify({ image: '', desc: '' });
-                                }
-                            })();
-                            """.trimIndent()
-                        ) { resultJson ->
-                            var previewImg = ""
-                            var pageDesc = ""
-                            if (!resultJson.isNullOrBlank() && resultJson != "null") {
-                                try {
-                                    val unquoted = if (resultJson.startsWith("\"") && resultJson.endsWith("\"")) {
-                                        org.json.JSONTokener(resultJson).nextValue().toString()
-                                    } else {
-                                        resultJson
-                                    }
-                                    val json = org.json.JSONObject(unquoted)
-                                    previewImg = json.optString("image", "")
-                                    pageDesc = json.optString("desc", "")
-                                } catch (_: Exception) {}
-                            }
-                            saveBookmarkWithDetails(previewImg, pageDesc)
-                        } ?: run {
-                            saveBookmarkWithDetails("", "")
+                        // Run WebView in background and capture all media from page
+                        pocketRepo.startDeepScan(bookmark.id, context)
+
+                        val initialCount = alreadyFetchedMediaItems.size
+                        val message = if (initialCount > 0) {
+                            "Saved to Pocket ($initialCount media) • Capturing all media..."
+                        } else {
+                            "Saved to Pocket • Capturing all media in background..."
                         }
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                     }
                 },
                 onShareClick = {
