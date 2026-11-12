@@ -146,4 +146,44 @@ class BookmarkDetailDownloadActivityTest {
         assertTrue(found?.isVideo == true)
         assertEquals(DownloadActivityStatus.FINISHED, found?.status)
     }
+
+    @Test
+    fun testSaveToPocketWithAlreadyFetchedMediaSavesMediaItemsToBookmark() {
+        val pocketRepo = PocketRepository.getInstance(context)
+
+        val fetchedItem1 = MediaInboxItem(
+            id = "scraped_item_1",
+            title = "Article Hero Image",
+            localUri = "",
+            sourceUrl = "https://news.example.com/images/hero.jpg",
+            isVideo = false,
+            format = "JPG"
+        )
+        val fetchedItem2 = MediaInboxItem(
+            id = "scraped_item_2",
+            title = "Article Video Explainer",
+            localUri = "",
+            sourceUrl = "https://news.example.com/videos/explainer.mp4",
+            isVideo = true,
+            format = "MP4"
+        )
+
+        // Simulate browser user clicking 'Save to Pocket' with already fetched media
+        val bookmark = pocketRepo.addBookmark(
+            title = "Breaking Science News",
+            url = "https://news.example.com/breaking",
+            domain = "news.example.com",
+            description = "Fascinating new discovery",
+            previewImageUrl = "",
+            autoFetchMetadata = false,
+            initialItems = listOf(fetchedItem1, fetchedItem2)
+        )
+
+        val savedBookmark = pocketRepo.bookmarks.value.firstOrNull { it.id == bookmark.id }
+        assertNotNull("Bookmark must be saved in PocketRepository", savedBookmark)
+        assertEquals(2, savedBookmark?.items?.size)
+        assertTrue("Must contain the hero image", savedBookmark?.items?.any { it.sourceUrl == "https://news.example.com/images/hero.jpg" } == true)
+        assertTrue("Must contain the explainer video", savedBookmark?.items?.any { it.isVideo && it.sourceUrl.contains("explainer.mp4") } == true)
+        assertEquals("Preview image should automatically resolve from fetched media", "https://news.example.com/images/hero.jpg", savedBookmark?.previewImageUrl)
+    }
 }

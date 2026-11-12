@@ -613,7 +613,8 @@ class PocketRepository(
         domain: String = "",
         description: String = "",
         previewImageUrl: String = "",
-        autoFetchMetadata: Boolean = true
+        autoFetchMetadata: Boolean = true,
+        initialItems: List<MediaInboxItem> = emptyList()
     ): MediaInboxStack {
         val cleanUrl = url.trim()
         val cleanDomain = domain.ifBlank { MediaClassifier.cleanDomainFromUrl(cleanUrl) }
@@ -639,7 +640,7 @@ class PocketRepository(
             cleanDomain.ifBlank { "Media" }
         }
 
-        val initialItems = if (isMedia) {
+        val directItems = if (isMedia) {
             listOf(
                 MediaInboxItem(
                     id = "media_${System.currentTimeMillis()}_${cleanUrl.hashCode().toUInt().toString(16)}",
@@ -654,16 +655,25 @@ class PocketRepository(
             emptyList()
         }
 
-        val initialPreview = previewImageUrl.ifBlank { if (isMedia) cleanUrl else "" }
+        val existingBookmark = _bookmarks.value.firstOrNull { it.sourceUrl.isNotBlank() && it.sourceUrl == cleanUrl }
+        val rawItems = directItems + initialItems + (existingBookmark?.items ?: emptyList())
+        val finalItems = MediaNormalizer.deduplicateMediaInboxItems(rawItems)
+
+        val initialPreview = previewImageUrl.ifBlank {
+            if (isMedia) cleanUrl
+            else finalItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                ?: finalItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
+                ?: existingBookmark?.previewImageUrl ?: ""
+        }
 
         val bookmark = MediaInboxStack(
-            id = "bookmark_${System.currentTimeMillis()}",
+            id = existingBookmark?.id ?: "bookmark_${System.currentTimeMillis()}",
             title = title.ifBlank { if (isMedia) mediaFileName else cleanDomain.ifBlank { cleanUrl } },
             sourceDomain = cleanDomain,
             sourceUrl = cleanUrl,
-            items = initialItems,
+            items = finalItems,
             timestampMillis = System.currentTimeMillis(),
-            description = description.ifBlank { if (isMedia) (if (isDirectVideo) "Saved Video" else "Saved Image") else "" },
+            description = description.ifBlank { if (isMedia) (if (isDirectVideo) "Saved Video" else "Saved Image") else existingBookmark?.description ?: "" },
             previewImageUrl = initialPreview
         )
         val updated = listOf(bookmark) + _bookmarks.value.filter {
@@ -707,7 +717,11 @@ class PocketRepository(
                 val newItems = if (latest.items.isEmpty() && meta.mediaItems.isNotEmpty()) {
                     meta.mediaItems
                 } else if (latest.items.isNotEmpty()) {
-                    latest.items
+                    if (meta.mediaItems.isNotEmpty()) {
+                        MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems)
+                    } else {
+                        latest.items
+                    }
                 } else if (newPreview.isNotBlank()) {
                     listOf(
                         MediaInboxItem(

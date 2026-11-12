@@ -548,6 +548,48 @@ fun DirectBrowserView(
                         val pocketRepo = com.amresalehin.emregallery.data.PocketRepository.getInstance(context)
                         val effectiveTitle = pageTitle.ifBlank { webViewInstance?.title ?: currentUrl }
                         
+                        // Collect all already fetched / discovered media from the active browser session
+                        val currentDetected = tabSession.getDetectedMedia()
+                        val currentDiscovered = DownloaderSession.discoveredItems.value
+                        val allScraped = (currentDetected + currentDiscovered).distinctBy { it.url }
+                        val alreadyFetchedMediaItems = allScraped.map { scraped ->
+                            com.amresalehin.emregallery.data.MediaInboxItem(
+                                id = scraped.id.ifBlank { "media_${scraped.url.hashCode().toUInt().toString(16)}" },
+                                title = scraped.title.ifBlank { effectiveTitle },
+                                localUri = "",
+                                sourceUrl = scraped.url,
+                                isVideo = scraped.isVideo,
+                                isAudio = scraped.isAudio,
+                                isStream = scraped.isStream,
+                                format = scraped.format,
+                                sizeBytes = scraped.sizeBytes ?: 0L,
+                                dateAddedMillis = scraped.detectedAt.takeIf { it > 0 } ?: System.currentTimeMillis()
+                            )
+                        }
+
+                        fun saveBookmarkWithDetails(previewImg: String, pageDesc: String) {
+                            val resolvedPreview = previewImg.ifBlank {
+                                alreadyFetchedMediaItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                                    ?: alreadyFetchedMediaItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
+                                    ?: ""
+                            }
+                            pocketRepo.addBookmark(
+                                title = effectiveTitle,
+                                url = currentUrl,
+                                description = pageDesc,
+                                previewImageUrl = resolvedPreview,
+                                autoFetchMetadata = true,
+                                initialItems = alreadyFetchedMediaItems
+                            )
+                            val count = alreadyFetchedMediaItems.size
+                            val message = if (count > 0) {
+                                "Saved to Pocket ($count media)"
+                            } else {
+                                "Saved to Pocket"
+                            }
+                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                        }
+
                         webViewInstance?.evaluateJavascript(
                             """
                             (function() {
@@ -579,22 +621,10 @@ fun DirectBrowserView(
                                     pageDesc = json.optString("desc", "")
                                 } catch (_: Exception) {}
                             }
-
-                            pocketRepo.addBookmark(
-                                title = effectiveTitle,
-                                url = currentUrl,
-                                description = pageDesc,
-                                previewImageUrl = previewImg,
-                                autoFetchMetadata = true
-                            )
+                            saveBookmarkWithDetails(previewImg, pageDesc)
                         } ?: run {
-                            pocketRepo.addBookmark(
-                                title = effectiveTitle,
-                                url = currentUrl,
-                                autoFetchMetadata = true
-                            )
+                            saveBookmarkWithDetails("", "")
                         }
-                        Toast.makeText(context, "Saved to Pocket", Toast.LENGTH_SHORT).show()
                     }
                 },
                 onShareClick = {
