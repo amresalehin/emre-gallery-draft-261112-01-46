@@ -48,13 +48,17 @@ import com.amresalehin.emregallery.data.RamGovernor
 import com.amresalehin.emregallery.data.BrowserSession
 import com.amresalehin.emregallery.data.BrowserShortcut
 import com.amresalehin.emregallery.data.BrowserTabItem
+import com.amresalehin.emregallery.data.DownloadQueueManager
 import com.amresalehin.emregallery.data.DownloaderSession
 import com.amresalehin.emregallery.data.ExtractionSource
 import com.amresalehin.emregallery.data.MediaCaptureEngine
+import com.amresalehin.emregallery.data.MediaCategory
 import com.amresalehin.emregallery.data.MediaClassifier
+import com.amresalehin.emregallery.data.MediaProvenance
 import com.amresalehin.emregallery.data.PocketDeepScanEngine
 import com.amresalehin.emregallery.data.PreferencesRepository
 import com.amresalehin.emregallery.data.ScrapedMediaItem
+import android.webkit.URLUtil
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -744,6 +748,41 @@ fun DirectBrowserView(
                                 mediaPlaybackRequiresUserGesture = true
                                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                                 userAgentString = BotDetectionMitigator.STEALTH_USER_AGENT
+                            }
+
+                            setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+                                if (!url.isNullOrBlank()) {
+                                    val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                                    val isVideo = mimetype?.startsWith("video/", ignoreCase = true) == true ||
+                                        fileName.endsWith(".mp4", ignoreCase = true) || fileName.endsWith(".webm", ignoreCase = true) ||
+                                        fileName.endsWith(".mkv", ignoreCase = true) || fileName.endsWith(".mov", ignoreCase = true)
+                                    val isAudio = mimetype?.startsWith("audio/", ignoreCase = true) == true
+                                    val item = ScrapedMediaItem(
+                                        id = "direct_dl_${System.currentTimeMillis()}_${url.hashCode()}",
+                                        url = url,
+                                        title = fileName,
+                                        isVideo = isVideo,
+                                        isAudio = isAudio,
+                                        category = if (isVideo) MediaCategory.VIDEOS else if (isAudio) MediaCategory.AUDIO else MediaCategory.IMAGES,
+                                        format = mimetype ?: (if (isVideo) "VIDEO" else "MEDIA"),
+                                        sizeBytes = if (contentLength > 0L) contentLength else null,
+                                        provenance = MediaProvenance(
+                                            extractorEngine = "InteractiveBrowser",
+                                            pageUrl = currentUrl
+                                        ),
+                                        downloadHeaders = mapOf(
+                                            "User-Agent" to (userAgent ?: BotDetectionMitigator.STEALTH_USER_AGENT),
+                                            "Referer" to currentUrl
+                                        )
+                                    )
+                                    DownloadQueueManager.enqueueDownload(
+                                        context = context,
+                                        item = item,
+                                        referer = currentUrl,
+                                        sourceUrl = currentUrl
+                                    )
+                                    Toast.makeText(context, "Downloading $fileName", Toast.LENGTH_SHORT).show()
+                                }
                             }
 
                             addJavascriptInterface(
