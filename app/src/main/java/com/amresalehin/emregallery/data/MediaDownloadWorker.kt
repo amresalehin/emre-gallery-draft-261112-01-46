@@ -13,6 +13,8 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.media.MediaScannerConnection
+import android.net.Uri
 import org.json.JSONObject
 import java.io.File
 import kotlin.math.abs
@@ -226,11 +228,38 @@ class MediaDownloadWorker(
             if (downloadedFile != null && downloadedFile.exists() && downloadedFile.length() > 0L) {
                 setProgress(workDataOf(KEY_PROGRESS to 1.0f, KEY_STATUS to "Saved successfully"))
 
+                val fileUri = Uri.fromFile(downloadedFile).toString()
+                runCatching {
+                    MediaScannerConnection.scanFile(
+                        applicationContext,
+                        arrayOf(downloadedFile.absolutePath),
+                        arrayOf(if (isVideo) "video/*" else if (isAudio) "audio/*" else "image/*"),
+                        null
+                    )
+                }
+
                 DownloadActivityManager.markFinished(
                     itemId = itemId,
-                    localUri = downloadedFile.absolutePath,
+                    localUri = fileUri,
                     sizeBytes = downloadedFile.length()
                 )
+
+                // If this download belongs to a Pocket bookmark, update its localUri as well
+                runCatching {
+                    val pocketRepo = PocketRepository.getInstance(applicationContext)
+                    val stack = pocketRepo.bookmarks.value.firstOrNull { it.id == stackId }
+                    if (stack != null) {
+                        val updatedItems = stack.items.map { itm ->
+                            if (itm.id == itemId || (itm.sourceUrl.isNotBlank() && itm.sourceUrl == mediaUrl)) {
+                                itm.copy(localUri = fileUri, sizeBytes = downloadedFile.length())
+                            } else itm
+                        }
+                        val updatedPreview = if (stack.previewImageUrl == mediaUrl || stack.previewImageUrl.isBlank()) {
+                            fileUri
+                        } else stack.previewImageUrl
+                        pocketRepo.updateBookmark(stack.copy(items = updatedItems, previewImageUrl = updatedPreview))
+                    }
+                }
 
                 Result.success(
                     workDataOf(

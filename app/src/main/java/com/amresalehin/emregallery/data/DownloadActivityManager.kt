@@ -243,7 +243,7 @@ object DownloadActivityManager {
     }
 
     /**
-     * Synchronizes and merges finished items from the real MediaInboxRepository.
+     * Synchronizes and merges finished items from the real MediaInboxRepository and PocketRepository.
      */
     fun syncWithInboxRepository() {
         val ctx = appContext ?: return
@@ -287,6 +287,56 @@ object DownloadActivityManager {
             }
         }
 
+        // Also synchronize finished media saved from Pocket Bookmarks
+        try {
+            val pocketRepo = PocketRepository.getInstance(ctx)
+            val pocketBookmarks = pocketRepo.bookmarks.value
+            for (stack in pocketBookmarks) {
+                for (item in stack.items) {
+                    if (item.localUri.isNotBlank()) {
+                        val localPath = item.localUri.removePrefix("file://")
+                        val file = File(localPath)
+                        if (file.exists() && file.length() > 0L) {
+                            val candidateId = item.id.ifBlank { "pocket_${stack.id}_${item.localUri.hashCode()}" }
+                            val uniqueId = if (seenIds.add(candidateId)) {
+                                candidateId
+                            } else {
+                                val fallback = "pocket_${stack.id}_${candidateId}_${item.localUri.hashCode()}"
+                                seenIds.add(fallback)
+                                fallback
+                            }
+
+                            finishedItems.add(
+                                DownloadActivityItem(
+                                    id = uniqueId,
+                                    title = item.title.ifBlank { stack.title.ifBlank { file.name } },
+                                    mediaUrl = item.sourceUrl.ifBlank { item.localUri },
+                                    thumbnailUrl = item.localUri,
+                                    localUri = item.localUri,
+                                    isVideo = item.isVideo,
+                                    isAudio = item.isAudio,
+                                    isStream = item.isStream,
+                                    format = item.format.ifBlank { if (item.isVideo) "MP4" else "JPG" },
+                                    status = DownloadActivityStatus.FINISHED,
+                                    progress = 1.0f,
+                                    bytesRead = file.length(),
+                                    totalBytes = file.length(),
+                                    timestampMillis = file.lastModified().takeIf { it > 0 } ?: stack.timestampMillis,
+                                    durationHint = if (item.isVideo) "HD" else null,
+                                    stackId = stack.id,
+                                    stackTitle = stack.title,
+                                    sourceDomain = stack.sourceDomain,
+                                    sourceUrl = stack.sourceUrl
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing with pocket repository", e)
+        }
+
         val currentActivities = _activities.value
         val existingFinished = currentActivities.filter { it.status == DownloadActivityStatus.FINISHED }
         val activeOrFailed = currentActivities.filter { it.status != DownloadActivityStatus.FINISHED }
@@ -316,7 +366,9 @@ object DownloadActivityManager {
         try {
             val storageDir = OkHttpDownloader.getTargetStorageDir(ctx)
             if (!storageDir.exists() || !storageDir.isDirectory) return
-            val files = storageDir.listFiles() ?: return
+            val files = storageDir.walkTopDown()
+                .filter { it.isFile && it.length() > 0 && !it.name.endsWith(".download") && !it.name.endsWith(".downloading") && !it.name.endsWith(".tmp") && !it.name.endsWith(".meta") }
+                .toList()
 
             val current = _activities.value.toMutableList()
             val existingLocalUris = current.mapNotNull { it.localUri }.toSet()
@@ -324,34 +376,33 @@ object DownloadActivityManager {
 
             var modified = false
             for (file in files) {
-                if (file.isFile && file.length() > 0 && !file.name.endsWith(".download") && !file.name.endsWith(".tmp")) {
-                    val fileUri = Uri.fromFile(file).toString()
-                    val fileName = file.name
-                    if (fileUri !in existingLocalUris && fileName.lowercase(Locale.ROOT) !in existingTitles) {
-                        val isVideo = fileName.endsWith(".mp4", true) || fileName.endsWith(".webm", true) || fileName.endsWith(".mkv", true)
-                        val isAudio = fileName.endsWith(".mp3", true) || fileName.endsWith(".m4a", true) || fileName.endsWith(".wav", true) || fileName.endsWith(".aac", true)
-                        val ext = file.extension.uppercase(Locale.ROOT).ifBlank { if (isVideo) "MP4" else if (isAudio) "MP3" else "JPG" }
+                val fileUri = Uri.fromFile(file).toString()
+                val filePath = file.absolutePath
+                val fileName = file.name
+                if (fileUri !in existingLocalUris && filePath !in existingLocalUris && fileName.lowercase(Locale.ROOT) !in existingTitles) {
+                    val isVideo = fileName.endsWith(".mp4", true) || fileName.endsWith(".webm", true) || fileName.endsWith(".mkv", true)
+                    val isAudio = fileName.endsWith(".mp3", true) || fileName.endsWith(".m4a", true) || fileName.endsWith(".wav", true) || fileName.endsWith(".aac", true)
+                    val ext = file.extension.uppercase(Locale.ROOT).ifBlank { if (isVideo) "MP4" else if (isAudio) "MP3" else "JPG" }
 
-                        current.add(
-                            DownloadActivityItem(
-                                id = "storage_${file.name.hashCode()}_${file.lastModified()}",
-                                title = fileName,
-                                mediaUrl = fileUri,
-                                thumbnailUrl = fileUri,
-                                localUri = fileUri,
-                                isVideo = isVideo,
-                                isAudio = isAudio,
-                                isStream = false,
-                                format = ext,
-                                status = DownloadActivityStatus.FINISHED,
-                                progress = 1.0f,
-                                bytesRead = file.length(),
-                                totalBytes = file.length(),
-                                timestampMillis = file.lastModified()
-                            )
+                    current.add(
+                        DownloadActivityItem(
+                            id = "storage_${file.name.hashCode()}_${file.lastModified()}",
+                            title = fileName,
+                            mediaUrl = fileUri,
+                            thumbnailUrl = fileUri,
+                            localUri = fileUri,
+                            isVideo = isVideo,
+                            isAudio = isAudio,
+                            isStream = false,
+                            format = ext,
+                            status = DownloadActivityStatus.FINISHED,
+                            progress = 1.0f,
+                            bytesRead = file.length(),
+                            totalBytes = file.length(),
+                            timestampMillis = file.lastModified()
                         )
-                        modified = true
-                    }
+                    )
+                    modified = true
                 }
             }
 

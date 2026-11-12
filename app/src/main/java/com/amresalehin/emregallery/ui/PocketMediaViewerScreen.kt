@@ -101,15 +101,18 @@ import com.amresalehin.emregallery.data.GalleryDlEngine
 import com.amresalehin.emregallery.data.OkHttpDownloader
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.amresalehin.emregallery.data.DownloadActivityManager
 import com.amresalehin.emregallery.data.DownloadQueueManager
 import com.amresalehin.emregallery.data.MediaCategory
 import com.amresalehin.emregallery.data.MediaInboxItem
 import com.amresalehin.emregallery.data.MediaInboxStack
+import com.amresalehin.emregallery.data.PocketRepository
 import com.amresalehin.emregallery.data.ScrapedMediaItem
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -613,7 +616,8 @@ private fun PocketMediaViewerContent(
 
 /**
  * Downloads or copies the current media item directly to the device's public Emre Gallery directory,
- * triggers MediaStore scan, and displays real-time Toast progress and confirmation.
+ * triggers MediaStore scan, records progress and finished activity in DownloadActivityManager so it appears
+ * on the Activity Page, updates the bookmark with the saved localUri, and displays real-time confirmation.
  */
 private fun executeSaveMedia(
     context: Context,
@@ -623,12 +627,14 @@ private fun executeSaveMedia(
 ) {
     coroutineScope.launch {
         Toast.makeText(context, "Saving media to device...", Toast.LENGTH_SHORT).show()
+        DownloadActivityManager.initialize(context)
+
         val targetDir = OkHttpDownloader.getTargetStorageDir(context)
         val downloadUrl = item.sourceUrl.ifBlank { item.localUri }
         val ext = when {
             item.isVideo -> "mp4"
             item.isAudio -> "mp3"
-            item.format.isNotBlank() && !item.format.contains("/") -> item.format.lowercase()
+            item.format.isNotBlank() && !item.format.contains("/") -> item.format.lowercase(Locale.ROOT)
             downloadUrl.contains(".mp4", ignoreCase = true) -> "mp4"
             downloadUrl.contains(".webm", ignoreCase = true) -> "webm"
             downloadUrl.contains(".png", ignoreCase = true) -> "png"
@@ -638,6 +644,27 @@ private fun executeSaveMedia(
         val safeBaseName = (item.title.ifBlank { stack.title.ifBlank { "media_${System.currentTimeMillis()}" } })
             .replace(Regex("[^a-zA-Z0-9._-]"), "_").take(40)
         val fileName = if (safeBaseName.endsWith(".$ext", ignoreCase = true)) safeBaseName else "${safeBaseName}.$ext"
+
+        val itemId = item.id.ifBlank { "pocket_dl_${abs((downloadUrl + System.currentTimeMillis()).hashCode())}" }
+        val displayTitle = item.title.ifBlank { stack.title.ifBlank { fileName } }
+        val isStreamUrl = item.isStream || downloadUrl.contains(".m3u8", ignoreCase = true) || downloadUrl.contains(".mpd", ignoreCase = true)
+        val thumb = if (item.localUri.isNotBlank()) item.localUri else (item.sourceUrl.ifBlank { stack.previewImageUrl })
+        val effectiveDomain = stack.sourceDomain.ifBlank { OkHttpDownloader.extractDomain(stack.sourceUrl.ifBlank { downloadUrl }) }
+
+        DownloadActivityManager.recordQueued(
+            id = itemId,
+            title = displayTitle,
+            mediaUrl = downloadUrl,
+            thumbnailUrl = thumb,
+            isVideo = item.isVideo,
+            isAudio = item.isAudio,
+            isStream = isStreamUrl,
+            format = ext.uppercase(Locale.ROOT),
+            stackId = stack.id,
+            stackTitle = stack.title.ifBlank { effectiveDomain },
+            sourceDomain = effectiveDomain,
+            sourceUrl = stack.sourceUrl.ifBlank { downloadUrl }
+        )
 
         // 1. If media is already stored locally on device, copy to public Emre Gallery directory directly
         val localFilePath = item.localUri.removePrefix("file://")
@@ -658,14 +685,21 @@ private fun executeSaveMedia(
                 }.getOrDefault(false)
             }
             if (copied) {
+                val fileUri = Uri.fromFile(destFile).toString()
+                DownloadActivityManager.markFinished(
+                    itemId = itemId,
+                    localUri = fileUri,
+                    sizeBytes = destFile.length()
+                )
+                updatePocketBookmarkMedia(context, stack, item, fileUri, destFile.length())
                 Toast.makeText(context, "Saved to device: ${destFile.name}", Toast.LENGTH_LONG).show()
                 return@launch
             }
         }
 
         // 2. FFmpeg stream engine for HLS (.m3u8), DASH (.mpd), and fragmented stream manifests
-        val isStreamUrl = item.isStream || downloadUrl.contains(".m3u8", ignoreCase = true) || downloadUrl.contains(".mpd", ignoreCase = true)
         if (isStreamUrl) {
+            DownloadActivityManager.updateProgress(itemId, 0.25f, 0L, 0L, 0L)
             val mp4FileName = if (fileName.endsWith(".mp4", ignoreCase = true)) fileName else "${fileName.substringBeforeLast('.')}.mp4"
             val targetFile = File(targetDir, mp4FileName)
             val remuxResult = withContext(Dispatchers.IO) {
@@ -676,6 +710,21 @@ private fun executeSaveMedia(
                 )
             }
             if (remuxResult.isSuccess && targetFile.exists() && targetFile.length() > 0L) {
+                val fileUri = Uri.fromFile(targetFile).toString()
+                withContext(Dispatchers.IO) {
+                    MediaScannerConnection.scanFile(
+                        context,
+                        arrayOf(targetFile.absolutePath),
+                        arrayOf("video/mp4"),
+                        null
+                    )
+                }
+                DownloadActivityManager.markFinished(
+                    itemId = itemId,
+                    localUri = fileUri,
+                    sizeBytes = targetFile.length()
+                )
+                updatePocketBookmarkMedia(context, stack, item, fileUri, targetFile.length())
                 Toast.makeText(context, "Saved stream to device via FFmpeg: ${targetFile.name}", Toast.LENGTH_LONG).show()
                 return@launch
             }
@@ -687,6 +736,7 @@ private fun executeSaveMedia(
             (stack.sourceUrl.isNotBlank() && GalleryDlEngine.checkSupport(stack.sourceUrl).isSupported)
         )
         if (isExtractorUrl) {
+            DownloadActivityManager.updateProgress(itemId, 0.35f, 0L, 0L, 0L)
             val gdlFile = withContext(Dispatchers.IO) {
                 GalleryDlEngine.downloadMedia(
                     context = context,
@@ -705,6 +755,21 @@ private fun executeSaveMedia(
                 }
             }
             if (gdlFile != null && gdlFile.exists() && gdlFile.length() > 0L) {
+                val fileUri = Uri.fromFile(gdlFile).toString()
+                withContext(Dispatchers.IO) {
+                    MediaScannerConnection.scanFile(
+                        context,
+                        arrayOf(gdlFile.absolutePath),
+                        arrayOf(if (item.isVideo) "video/*" else "image/*"),
+                        null
+                    )
+                }
+                DownloadActivityManager.markFinished(
+                    itemId = itemId,
+                    localUri = fileUri,
+                    sizeBytes = gdlFile.length()
+                )
+                updatePocketBookmarkMedia(context, stack, item, fileUri, gdlFile.length())
                 Toast.makeText(context, "Saved to device via extractor engine: ${gdlFile.name}", Toast.LENGTH_LONG).show()
                 return@launch
             }
@@ -715,15 +780,23 @@ private fun executeSaveMedia(
             downloadUrl.startsWith("https://", ignoreCase = true) ||
             downloadUrl.startsWith("data:", ignoreCase = true)
         ) {
+            DownloadActivityManager.updateProgress(itemId, 0.15f, 0L, 0L, 0L)
             val result = withContext(Dispatchers.IO) {
                 OkHttpDownloader.downloadMediaFileDetailed(
                     context = context,
                     mediaUrl = downloadUrl,
                     fileName = fileName,
-                    referer = stack.sourceUrl.ifBlank { null }
+                    referer = stack.sourceUrl.ifBlank { null },
+                    downloadId = itemId,
+                    domain = effectiveDomain,
+                    onProgress = { bytesRead, totalBytes ->
+                        val ratio = if (totalBytes > 0L) (bytesRead.toFloat() / totalBytes.toFloat()).coerceIn(0.1f, 0.95f) else 0.5f
+                        DownloadActivityManager.updateProgress(itemId, ratio, bytesRead, totalBytes, 0L)
+                    }
                 )
             }
             if (result.isSuccessful && result.file != null && result.file.exists()) {
+                val fileUri = Uri.fromFile(result.file).toString()
                 withContext(Dispatchers.IO) {
                     MediaScannerConnection.scanFile(
                         context,
@@ -732,21 +805,27 @@ private fun executeSaveMedia(
                         null
                     )
                 }
+                DownloadActivityManager.markFinished(
+                    itemId = itemId,
+                    localUri = fileUri,
+                    sizeBytes = result.file.length()
+                )
+                updatePocketBookmarkMedia(context, stack, item, fileUri, result.file.length())
                 Toast.makeText(context, "Saved to device: ${result.file.name}", Toast.LENGTH_LONG).show()
                 return@launch
             }
         }
 
-        // 3. Fallback: Enqueue download in background with retry flag
+        // 5. Fallback: Enqueue download in background with retry flag
         val scraped = ScrapedMediaItem(
-            id = item.id.ifBlank { "dl_${System.currentTimeMillis()}" },
+            id = itemId,
             url = downloadUrl,
-            title = item.title.ifBlank { stack.title.ifBlank { "Media Download" } },
+            title = displayTitle,
             isVideo = item.isVideo,
             isAudio = item.isAudio,
-            isStream = item.isStream,
+            isStream = isStreamUrl,
             category = if (item.isVideo) MediaCategory.VIDEOS else MediaCategory.IMAGES,
-            format = item.format.ifBlank { if (item.isVideo) "MP4" else "IMAGE" },
+            format = item.format.ifBlank { ext.uppercase(Locale.ROOT) },
             source = "Bookmark Viewer"
         )
         DownloadQueueManager.enqueueDownload(
@@ -754,12 +833,37 @@ private fun executeSaveMedia(
             item = scraped,
             referer = stack.sourceUrl.ifBlank { null },
             stackId = stack.id,
-            stackTitle = stack.title.ifBlank { null },
-            sourceDomain = stack.sourceDomain.ifBlank { null },
-            sourceUrl = stack.sourceUrl.ifBlank { null },
+            stackTitle = stack.title.ifBlank { effectiveDomain },
+            sourceDomain = effectiveDomain,
+            sourceUrl = stack.sourceUrl.ifBlank { downloadUrl },
             isRetry = true
         )
         Toast.makeText(context, "Download queued to device", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/**
+ * Updates the bookmark record in PocketRepository with the downloaded media file's local URI.
+ */
+private fun updatePocketBookmarkMedia(
+    context: Context,
+    stack: MediaInboxStack,
+    item: MediaInboxItem,
+    savedFileUri: String,
+    sizeBytes: Long
+) {
+    runCatching {
+        val pocketRepo = PocketRepository.getInstance(context)
+        val currentStack = pocketRepo.bookmarks.value.firstOrNull { it.id == stack.id } ?: stack
+        val updatedItems = currentStack.items.map { itm ->
+            if (itm.id == item.id || (itm.sourceUrl.isNotBlank() && itm.sourceUrl == item.sourceUrl)) {
+                itm.copy(localUri = savedFileUri, sizeBytes = sizeBytes)
+            } else itm
+        }
+        val updatedPreview = if (currentStack.previewImageUrl == item.sourceUrl || currentStack.previewImageUrl.isBlank()) {
+            savedFileUri
+        } else currentStack.previewImageUrl
+        pocketRepo.updateBookmark(currentStack.copy(items = updatedItems, previewImageUrl = updatedPreview))
     }
 }
 
