@@ -28,14 +28,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * On-demand, hardware-accelerated Deep Scan engine for JavaScript-heavy, scrollable websites.
- * Operates strictly upon user request with a hard 30-second cap.
+ * Runs continuously in the background to discover media until manually stopped by the user.
  * Streams discovered media incrementally back to the caller in real time.
  */
 object PocketDeepScanEngine {
     private const val TAG = "PocketDeepScanEngine"
-    private const val MAX_SCAN_DURATION_MS = 30_000L
     private const val SCROLL_CADENCE_MS = 1_000L
-    private const val EARLY_EXIT_CONSECUTIVE_EMPTY = 4
 
     private val isScanning = AtomicBoolean(false)
     private var scanJob: Job? = null
@@ -54,7 +52,7 @@ object PocketDeepScanEngine {
 
     /**
      * Starts an on-demand hardware-accelerated deep scan for the given bookmark URL.
-     * Capped strictly at 30 seconds or until manually stopped.
+     * Continuously runs and scrolls until manually stopped by the user.
      */
     fun startScan(
         context: Context,
@@ -79,8 +77,6 @@ object PocketDeepScanEngine {
             val appContext = context.applicationContext
             var webView: WebView? = null
             val seenUrls = mutableSetOf<String>()
-            var consecutiveEmptyCount = 0
-            val startTime = System.currentTimeMillis()
 
             try {
                 webView = createHardwareAcceleratedWebView(appContext, targetUrl)
@@ -92,13 +88,8 @@ object PocketDeepScanEngine {
                 // Allow initial DOM load and hydrate
                 delay(1_500L)
 
+                // Continuous scanning loop - user stops it manually
                 while (isActive && isScanning.get()) {
-                    val elapsed = System.currentTimeMillis() - startTime
-                    if (elapsed >= MAX_SCAN_DURATION_MS) {
-                        Log.d(TAG, "Deep scan reached 30s maximum duration for $targetUrl. Auto-stopping.")
-                        break
-                    }
-
                     val currentWv = webView ?: break
 
                     // Active 30% RAM protection: enforce memory limit to prevent app freezes & renderer crashes
@@ -136,16 +127,8 @@ object PocketDeepScanEngine {
                     }
 
                     if (newItems.isNotEmpty()) {
-                        consecutiveEmptyCount = 0
                         withContext(Dispatchers.Default) {
                             onIncrementalMediaDiscovered(newItems)
-                        }
-                    } else {
-                        consecutiveEmptyCount++
-                        // If 4 consecutive scrolls after at least 8 seconds yield zero new media, exit early
-                        if (elapsed >= 8_000L && consecutiveEmptyCount >= EARLY_EXIT_CONSECUTIVE_EMPTY) {
-                            Log.d(TAG, "Early exit triggered: No new media after $consecutiveEmptyCount scrolls.")
-                            break
                         }
                     }
 

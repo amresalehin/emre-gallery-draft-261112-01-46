@@ -848,7 +848,7 @@ class PocketRepository(
 
     /**
      * Starts an on-demand hardware-accelerated deep scan for a bookmark.
-     * Capped at 30 seconds with automatic scroll and real-time incremental media discovery.
+     * Runs continuously in the background until manually stopped by the user.
      */
     fun startDeepScan(bookmarkId: String, context: Context = this.context) {
         val target = _bookmarks.value.find { it.id == bookmarkId } ?: return
@@ -864,7 +864,7 @@ class PocketRepository(
             onIncrementalMediaDiscovered = { newCandidates ->
                 val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@startScan
                 val combined = newCandidates + current.items
-                val resolvedItems = MediaNormalizer.deduplicateMediaInboxItems(combined).take(120)
+                val resolvedItems = MediaNormalizer.deduplicateMediaInboxItems(combined).take(1000)
                 val newPreview = if (current.previewImageUrl.isBlank()) {
                     resolvedItems.firstOrNull { !it.isVideo }?.sourceUrl
                         ?: resolvedItems.firstOrNull()?.sourceUrl

@@ -209,4 +209,25 @@ class BookmarkDetailDownloadActivityTest {
         assertTrue("Sanitized items must be empty when no real media is present", sanitized.items.isEmpty())
         assertTrue("No synthetic preview item ID should exist", sanitized.items.none { it.id.startsWith("preview_") || it.id.startsWith("media_preview_") })
     }
+
+    @Test
+    fun testDeepScanRunsAndStopsManually() {
+        val pocketRepo = PocketRepository.getInstance(context)
+        val bookmark = pocketRepo.addBookmark(
+            title = "Continuous Gallery",
+            url = "https://gallery.example.com/photos",
+            domain = "gallery.example.com",
+            autoFetchMetadata = false
+        )
+
+        // Start deep scan
+        pocketRepo.startDeepScan(bookmark.id, context)
+        assertEquals("activeDeepScanId must track currently scanning bookmark", bookmark.id, pocketRepo.activeDeepScanId.value)
+        assertTrue("isDeepScanning must be true for active bookmark", pocketRepo.isDeepScanning(bookmark.id))
+
+        // User stops manually
+        pocketRepo.stopDeepScan(bookmark.id)
+        org.junit.Assert.assertNull("activeDeepScanId must be cleared after manual stop", pocketRepo.activeDeepScanId.value)
+        org.junit.Assert.assertFalse("isDeepScanning must be false after manual stop", pocketRepo.isDeepScanning(bookmark.id))
+    }
 }

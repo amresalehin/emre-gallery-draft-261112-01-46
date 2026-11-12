@@ -502,7 +502,7 @@ fun PocketBookmarkViewerPage(
                             }
                         }
 
-                        // 4. On-Demand 30s Deep Scan (Hardware-Accelerated with dynamic scan / stop toggle, no toast)
+                        // 4. On-Demand Deep Scan (Hardware-Accelerated with dynamic scan / stop toggle, user-controlled)
                         if (stack.sourceUrl.isNotBlank()) {
                             val isDeepScanning = activeDeepScanId == stack.id
                             Surface(
@@ -570,8 +570,41 @@ fun PocketBookmarkViewerPage(
                     }
                 }
 
-                // Card counter pill indicator (e.g. "2 / 5") moved ABOVE card stack
-                if (totalCards > 1) {
+                // Card counter or active deep-scan pill indicator above card stack
+                val isDeepScanning = activeDeepScanId == stack.id
+                if (isDeepScanning) {
+                    Surface(
+                        shape = CircleShape,
+                        color = if (isDark) Color(0xFF26242C) else Color(0xFFEDE8F0),
+                        border = BorderStroke(0.8.dp, if (isDark) dividerCol.copy(alpha = 0.6f) else Color(0xFFDAD5DF)),
+                        modifier = Modifier
+                            .padding(top = 2.dp, bottom = 6.dp)
+                            .clickable { pocketRepo.stopDeepScan(stack.id) }
+                            .testTag("bookmark_deep_scan_running_badge")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(13.dp),
+                                strokeWidth = 1.6.dp,
+                                color = textColor,
+                                trackColor = textColor.copy(alpha = 0.15f)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = if (totalCards > 0) "${safeIndex + 1} / $totalCards · Scanning (Tap to stop)" else "Scanning page · Tap to stop",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 12.sp,
+                                    letterSpacing = 0.3.sp
+                                ),
+                                color = textColor
+                            )
+                        }
+                    }
+                } else if (totalCards > 1) {
                     Surface(
                         shape = CircleShape,
                         color = if (isDark) Color(0xFF26242C) else Color(0xFFEDE8F0),
@@ -866,7 +899,7 @@ fun PocketBookmarkViewerPage(
                                 )
                                 Spacer(Modifier.height(6.dp))
                                 Text(
-                                    text = if (isDeepScanning) "Running background WebView to capture all photos, videos, and streams..."
+                                    text = if (isDeepScanning) "Running background WebView to capture all photos, videos, and streams (tap radar icon or badge above to stop)..."
                                            else if (stack.items.isEmpty()) "Tap the radar button in the toolbar above to scan and capture all media from this page."
                                            else "All site media were excluded by active size, dimension, or format filters.",
                                     style = MaterialTheme.typography.bodySmall,
