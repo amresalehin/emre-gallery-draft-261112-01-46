@@ -54,6 +54,8 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import com.amresalehin.emregallery.R
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -693,9 +695,10 @@ fun BrowserTopBar(
                     Box(contentAlignment = Alignment.Center) {
                         if (isDeepScanning) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(30.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.primary
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 1.5.dp,
+                                color = BrowserThemeColors.iconTint(isDark),
+                                trackColor = BrowserThemeColors.iconTint(isDark).copy(alpha = 0.15f)
                             )
                         }
                         if (discoveredCount > 0) {
@@ -933,7 +936,7 @@ fun BrowserTopBar(
                                         }
                                     }
                                     else -> {
-                                        Icon(Icons.Default.TravelExplore, contentDescription = null, tint = BrowserThemeColors.iconTint(isDark))
+                                        Icon(painter = painterResource(id = R.drawable.ic_radar), contentDescription = null, tint = BrowserThemeColors.iconTint(isDark))
                                     }
                                 }
                             },

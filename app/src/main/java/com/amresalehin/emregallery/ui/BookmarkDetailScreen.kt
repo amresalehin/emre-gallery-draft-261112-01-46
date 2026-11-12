@@ -49,10 +49,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.amresalehin.emregallery.R
 import coil.imageLoader
 import coil.request.ImageRequest
 import com.amresalehin.emregallery.data.MediaClassifier
@@ -525,16 +527,9 @@ fun PocketBookmarkViewerPage(
                             val isDeepScanning = activeDeepScanId == stack.id
                             Surface(
                                 shape = CircleShape,
-                                color = if (isDeepScanning) (if (isDark) Color(0xFF2C1E1E) else Color(0xFFFFEBEE)) else barSurface,
+                                color = barSurface,
                                 shadowElevation = if (isDark) 2.dp else 1.dp,
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isDeepScanning) {
-                                        if (isDark) Color(0xFFE57373) else Color(0xFFE53935)
-                                    } else {
-                                        if (isDark) dividerCol.copy(alpha = 0.7f) else dividerCol
-                                    }
-                                ),
+                                border = BorderStroke(1.dp, if (isDark) dividerCol.copy(alpha = 0.7f) else dividerCol),
                                 modifier = Modifier
                                     .size(44.dp)
                                     .clickable {
@@ -549,22 +544,23 @@ fun PocketBookmarkViewerPage(
                                 Box(contentAlignment = Alignment.Center) {
                                     if (isDeepScanning) {
                                         CircularProgressIndicator(
-                                            modifier = Modifier.size(34.dp),
-                                            strokeWidth = 2.dp,
-                                            color = if (isDark) Color(0xFFEF5350) else Color(0xFFE53935)
+                                            modifier = Modifier.size(22.dp),
+                                            strokeWidth = 1.5.dp,
+                                            color = textColor,
+                                            trackColor = textColor.copy(alpha = 0.15f)
                                         )
                                         Icon(
-                                            imageVector = Icons.Default.StopCircle,
+                                            painter = painterResource(id = R.drawable.ic_radar),
                                             contentDescription = "Stop deep scan",
-                                            tint = if (isDark) Color(0xFFEF5350) else Color(0xFFE53935),
-                                            modifier = Modifier.size(20.dp)
+                                            tint = textColor,
+                                            modifier = Modifier.size(13.dp)
                                         )
                                     } else {
                                         Icon(
-                                            imageVector = Icons.Default.TravelExplore,
+                                            painter = painterResource(id = R.drawable.ic_radar),
                                             contentDescription = "Deep scan page media",
                                             tint = textColor,
-                                            modifier = Modifier.size(20.dp)
+                                            modifier = Modifier.size(19.dp)
                                         )
                                     }
                                 }

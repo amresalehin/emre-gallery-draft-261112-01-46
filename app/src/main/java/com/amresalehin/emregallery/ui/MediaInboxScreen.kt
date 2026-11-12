@@ -22,6 +22,8 @@ import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
+import androidx.compose.ui.res.painterResource
+import com.amresalehin.emregallery.R
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -239,16 +241,25 @@ fun DiscoveredMediaPage(
                         Box(contentAlignment = Alignment.Center) {
                             if (isDeepScanning) {
                                 CircularProgressIndicator(
-                                    modifier = Modifier.size(32.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 1.5.dp,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f)
+                                )
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_radar),
+                                    contentDescription = "Stop deep scan",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            } else {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_radar),
+                                    contentDescription = "Run deep scan",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
-                            Icon(
-                                imageVector = Icons.Default.TravelExplore,
-                                contentDescription = if (isDeepScanning) "Stop deep scan" else "Run deep scan",
-                                tint = if (isDeepScanning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                            )
                         }
                     }
                 }
