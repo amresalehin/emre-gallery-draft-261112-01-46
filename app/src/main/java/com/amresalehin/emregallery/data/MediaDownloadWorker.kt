@@ -149,6 +149,9 @@ class MediaDownloadWorker(
                 mediaUrl
             }
 
+            val effectiveDomain = sourceDomain.takeIf { it.isNotBlank() }
+                ?: OkHttpDownloader.extractDomain(sourceUrl.ifBlank { mediaUrl })
+
             // Strategy 1: Direct HTTP media via OkHttp (fast path, byte-level ranges, resumable)
             if (isDirectHttpAsset) {
                 setProgress(workDataOf(KEY_PROGRESS to 0.25f, KEY_STATUS to "Downloading via OkHttp: $title..."))
@@ -159,6 +162,7 @@ class MediaDownloadWorker(
                     referer = referer ?: sourceUrl,
                     downloadId = itemId,
                     headers = downloadHeaders,
+                    domain = effectiveDomain,
                     onProgress = { bytesRead, totalBytes ->
                         val ratio = if (totalBytes > 0L) (bytesRead.toFloat() / totalBytes.toFloat()).coerceIn(0.1f, 0.95f) else 0.5f
                         DownloadActivityManager.updateProgress(itemId, ratio, bytesRead, totalBytes, 0L)
@@ -178,7 +182,8 @@ class MediaDownloadWorker(
                     fileName = fileName,
                     referer = referer ?: sourceUrl,
                     headers = downloadHeaders,
-                    cookies = cookieString
+                    cookies = cookieString,
+                    domain = effectiveDomain
                 )
                 // If targetUrl != mediaUrl and extractor returned null, retry with mediaUrl directly
                 if ((downloadedFile == null || !downloadedFile.exists() || downloadedFile.length() == 0L) && targetUrl != mediaUrl) {
@@ -188,7 +193,8 @@ class MediaDownloadWorker(
                         fileName = fileName,
                         referer = referer ?: sourceUrl,
                         headers = downloadHeaders,
-                        cookies = cookieString
+                        cookies = cookieString,
+                        domain = effectiveDomain
                     )
                 }
             }
@@ -202,7 +208,8 @@ class MediaDownloadWorker(
                     fileName = fileName,
                     referer = referer ?: sourceUrl,
                     downloadId = itemId,
-                    headers = downloadHeaders
+                    headers = downloadHeaders,
+                    domain = effectiveDomain
                 )
                 if (fallbackResult.isSuccessful && fallbackResult.file != null && fallbackResult.file.exists() && fallbackResult.file.length() > 0L) {
                     downloadedFile = fallbackResult.file

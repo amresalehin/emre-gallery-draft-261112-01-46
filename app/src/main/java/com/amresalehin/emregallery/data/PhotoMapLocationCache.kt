@@ -35,6 +35,15 @@ data class LocationProvenance(
 class PhotoMapLocationCache(context: Context) :
     SQLiteOpenHelper(context.applicationContext, "photo_map_locations.db", null, 4) {
 
+    init {
+        setWriteAheadLoggingEnabled(true)
+    }
+
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.enableWriteAheadLogging()
+    }
+
     data class CachedLocation(
         val point: GeoPoint?,
         val provenance: LocationProvenance? = null

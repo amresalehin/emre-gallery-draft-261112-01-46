@@ -89,11 +89,14 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import android.view.LayoutInflater
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.amresalehin.emregallery.R
 import com.amresalehin.emregallery.data.GalleryDlEngine
 import com.amresalehin.emregallery.data.OkHttpDownloader
 import coil.compose.AsyncImage
@@ -1171,7 +1174,10 @@ fun BookmarkDeckVideoPlayer(
             }
             .build()
 
-        ExoPlayer.Builder(context)
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+
+        ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .build().apply {
@@ -1181,8 +1187,14 @@ fun BookmarkDeckVideoPlayer(
                 volume = if (isMuted) 0f else 1f
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: PlaybackException) {
-                        Log.w("BookmarkDeckVideoPlayer", "Playback error encountered: ${error.message}. Retrying prepare.")
-                        prepare()
+                        Log.w("BookmarkDeckVideoPlayer", "Playback error encountered: ${error.message} (${error.errorCodeName})")
+                        val cause = error.cause
+                        if (cause is androidx.media3.exoplayer.video.MediaCodecVideoDecoderException ||
+                            cause is IllegalStateException) {
+                            clearVideoSurface()
+                        } else {
+                            prepare()
+                        }
                     }
                 })
                 prepare()
@@ -1214,6 +1226,7 @@ fun BookmarkDeckVideoPlayer(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            player.clearVideoSurface()
             player.stop()
             player.release()
         }
@@ -1222,7 +1235,9 @@ fun BookmarkDeckVideoPlayer(
     Box(modifier = modifier) {
         AndroidView(
             factory = { ctx ->
-                PlayerView(ctx).apply {
+                val pv = LayoutInflater.from(ctx)
+                    .inflate(R.layout.item_viewer_player, null, false) as PlayerView
+                pv.apply {
                     this.player = player
                     useController = false
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -1238,6 +1253,12 @@ fun BookmarkDeckVideoPlayer(
                 if (pv.player != player) {
                     pv.player = player
                 }
+            },
+            onRelease = { pv ->
+                pv.player = null
+            },
+            onReset = { pv ->
+                pv.player = null
             },
             modifier = Modifier.fillMaxSize()
         )

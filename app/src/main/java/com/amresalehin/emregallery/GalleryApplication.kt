@@ -61,6 +61,7 @@ class GalleryApplication : Application() {
         com.amresalehin.emregallery.face.FaceEngineRegistry.register(com.amresalehin.emregallery.face.BuffaloLFaceEngineFactory)
         com.amresalehin.emregallery.face.FaceEngineRegistry.register(com.amresalehin.emregallery.face.EnteFaceEngineFactory)
         com.amresalehin.emregallery.face.FaceProcessingCoordinator.init(this)
+        com.amresalehin.emregallery.data.DiscoveryFilterManager.init(this)
 
         // Initialize Chaquopy Python SDK and gallery-dl media engine asynchronously in the background.
         // Running this off the UI thread eliminates the 2-4s main thread blockage on cold start,
@@ -93,8 +94,7 @@ class GalleryApplication : Application() {
                             try {
                                 val cm = android.webkit.CookieManager.getInstance()
                                 cm.setAcceptCookie(true)
-                                val dummy = android.webkit.WebView(context.applicationContext)
-                                dummy.destroy()
+                                cm.flush()
                                 isChromiumWarmedUp = true
                             } catch (_: Throwable) {}
                         }
@@ -123,11 +123,12 @@ class GalleryApplication : Application() {
         runCatching {
             val coilCache = Coil.imageLoader(this).memoryCache
             when {
-                level >= TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE -> {
+                level >= TRIM_MEMORY_RUNNING_LOW || level >= TRIM_MEMORY_COMPLETE || com.amresalehin.emregallery.data.RamGovernor.isHeapLimitExceeded() -> {
                     coilCache?.clear()
                     com.amresalehin.emregallery.face.FaceThumbnailHelper.clearCache()
+                    System.gc()
                 }
-                level >= TRIM_MEMORY_RUNNING_LOW || level >= TRIM_MEMORY_BACKGROUND -> {
+                level >= TRIM_MEMORY_RUNNING_MODERATE || level >= TRIM_MEMORY_BACKGROUND -> {
                     coilCache?.trimMemory(level)
                     com.amresalehin.emregallery.face.FaceThumbnailHelper.trimMemory(level)
                 }

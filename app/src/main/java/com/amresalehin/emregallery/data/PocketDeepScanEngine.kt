@@ -101,7 +101,18 @@ object PocketDeepScanEngine {
 
                     val currentWv = webView ?: break
 
-                    // Trigger scroll on the page
+                    // Active 30% RAM protection: enforce memory limit to prevent app freezes & renderer crashes
+                    if (RamGovernor.isHeapLimitExceeded()) {
+                        Log.w(TAG, "RAM limit of 30% reached during deep scan. Enforcing memory reclaim.")
+                        RamGovernor.enforceLimit(appContext, currentWv)
+                        delay(150L)
+                        if (RamGovernor.isHeapLimitExceeded()) {
+                            Log.w(TAG, "RAM usage still >= 30% after reclaim. Halting deep scan to protect system stability.")
+                            break
+                        }
+                    }
+
+                    // Trigger scroll on the page and prune heavy media buffers in off-screen DOM
                     val scrollScript = """
                         (function() {
                             try {
@@ -111,6 +122,9 @@ object PocketDeepScanEngine {
                         })();
                     """.trimIndent()
                     currentWv.evaluateJavascript(scrollScript, null)
+
+                    // Prune video and canvas buffers in Chromium renderer to prevent code -1 crashes
+                    currentWv.evaluateJavascript(RamGovernor.MEDIA_BUFFER_PRUNING_JS, null)
 
                     // Execute media extraction script in page context
                     val extractionScript = buildMediaExtractionScript()
@@ -176,9 +190,9 @@ object PocketDeepScanEngine {
     @SuppressLint("SetJavaScriptEnabled")
     private fun createHardwareAcceleratedWebView(context: Context, initialUrl: String): WebView {
         return WebView(context).apply {
-            // Hardware acceleration enabled for maximum rendering performance on modern JS apps
+            // Software layer for background DOM scraping avoids missing GPU rendernode crashes in emulators
             layoutParams = ViewGroup.LayoutParams(1080, 1920)
-            setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+            setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
 
             settings.apply {
                 javaScriptEnabled = true
@@ -187,7 +201,7 @@ object PocketDeepScanEngine {
                 mediaPlaybackRequiresUserGesture = true
                 loadsImagesAutomatically = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                cacheMode = WebSettings.LOAD_DEFAULT
+                cacheMode = WebSettings.LOAD_NO_CACHE
                 userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
             }
 
@@ -226,6 +240,8 @@ object PocketDeepScanEngine {
             wv.clearHistory()
             wv.onPause()
             (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.webViewClient = WebViewClient()
+            wv.webChromeClient = WebChromeClient()
             wv.destroy()
         } catch (e: Exception) {
             Log.w(TAG, "Error cleaning up deep scan WebView", e)

@@ -486,15 +486,30 @@ object OkHttpDownloader {
     }
 
     /**
-     * Resolves and ensures existence of the target storage directory (public Downloads or app external storage).
+     * Extracts a sanitized host/domain token from a URL or referer.
      */
-    fun getTargetStorageDir(context: Context): File {
+    fun extractDomain(rawUrl: String?): String {
+        if (rawUrl.isNullOrBlank()) return "general"
+        val trimmed = rawUrl.trim()
+        if (trimmed.startsWith("data:", ignoreCase = true)) return "embedded_data"
+        return runCatching {
+            val uri = java.net.URI(trimmed)
+            var host = uri.host ?: ""
+            if (host.startsWith("www.", ignoreCase = true)) {
+                host = host.substring(4)
+            }
+            host.replace(Regex("[^a-zA-Z0-9.-]"), "_").trim().takeIf { it.isNotBlank() } ?: "general"
+        }.getOrDefault("general")
+    }
+
+    /**
+     * Resolves and ensures existence of the target storage directory:
+     * Device Download Folder under Subfolder 'Emre Gallery' and then subfolder within it by Domains.
+     */
+    fun getTargetStorageDir(context: Context, domain: String? = null): File {
         val publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         val emreGalleryDir = File(publicDownloads, "Emre Gallery")
-        if (!emreGalleryDir.exists()) {
-            emreGalleryDir.mkdirs()
-        }
-        return if (emreGalleryDir.exists() && emreGalleryDir.canWrite()) {
+        val baseDir = if (emreGalleryDir.exists() || emreGalleryDir.mkdirs()) {
             emreGalleryDir
         } else {
             val appExternal = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
@@ -502,10 +517,26 @@ object OkHttpDownloader {
             if (!fallbackFolder.exists()) fallbackFolder.mkdirs()
             fallbackFolder
         }
+
+        if (domain.isNullOrBlank()) {
+            return baseDir
+        }
+
+        val cleanDomain = domain.replace(Regex("[^a-zA-Z0-9.-]"), "_").trim().takeIf { it.isNotBlank() } ?: "general"
+        val domainDir = File(baseDir, cleanDomain)
+        if (!domainDir.exists()) {
+            domainDir.mkdirs()
+        }
+        return if (domainDir.exists() && domainDir.canWrite()) {
+            domainDir
+        } else {
+            baseDir
+        }
     }
 
     /**
      * Downloads an image, video, audio file, or stream to storage with resumable Range support.
+     * Saved under: Download/Emre Gallery/<domain>/
      */
     suspend fun downloadMediaFileDetailed(
         context: Context,
@@ -514,14 +545,19 @@ object OkHttpDownloader {
         referer: String? = null,
         downloadId: String? = null,
         headers: Map<String, String>? = null,
+        domain: String? = null,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): DownloadResult = withContext(Dispatchers.IO) {
+        val effectiveDomain = domain?.takeIf { it.isNotBlank() }
+            ?: extractDomain(referer ?: mediaUrl).takeIf { it != "general" && it != "localhost" }
+
         // Handle Base64 inline data URIs directly without network calls
         if (mediaUrl.startsWith("data:image/", ignoreCase = true)) {
-            return@withContext downloadDataUriMedia(context, mediaUrl, fileName, downloadId)
+            return@withContext downloadDataUriMedia(context, mediaUrl, fileName, downloadId, effectiveDomain)
         }
 
-        val targetDir = getTargetStorageDir(context)
+        val baseDir = getTargetStorageDir(context, null)
+        val domainDir = if (effectiveDomain != null) getTargetStorageDir(context, effectiveDomain) else baseDir
 
         val sanitizedName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
         val deterministicBase = if (!downloadId.isNullOrBlank()) {
@@ -534,6 +570,13 @@ object OkHttpDownloader {
             }
         } else {
             generateDeterministicId(mediaUrl, sanitizedName)
+        }
+
+        // Check if an existing resuming temp file is in baseDir (e.g. from local unit tests or unassigned domain)
+        val targetDir = if (File(baseDir, "$deterministicBase.downloading").exists() && !File(domainDir, "$deterministicBase.downloading").exists()) {
+            baseDir
+        } else {
+            domainDir
         }
 
         val finalFile = File(targetDir, deterministicBase)
@@ -996,10 +1039,11 @@ object OkHttpDownloader {
         context: Context,
         dataUri: String,
         fileName: String,
-        downloadId: String?
+        downloadId: String?,
+        domain: String? = null
     ): DownloadResult {
         return try {
-            val targetDir = getTargetStorageDir(context)
+            val targetDir = getTargetStorageDir(context, domain)
             val dataInfo = MediaClassifier.parseDataUriInfo(dataUri)
             val ext = dataInfo?.format?.lowercase(Locale.ROOT) ?: "png"
             val mimeType = dataInfo?.mimeType ?: "image/png"
@@ -1094,7 +1138,15 @@ object OkHttpDownloader {
         headers: Map<String, String>? = null,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): File? {
-        val res = downloadMediaFileDetailed(context, mediaUrl, fileName, referer, downloadId, headers, onProgress)
+        val res = downloadMediaFileDetailed(
+            context = context,
+            mediaUrl = mediaUrl,
+            fileName = fileName,
+            referer = referer,
+            downloadId = downloadId,
+            headers = headers,
+            onProgress = onProgress
+        )
         return res.file
     }
 }

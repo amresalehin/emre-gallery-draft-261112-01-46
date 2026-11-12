@@ -392,22 +392,13 @@ object GalleryDlEngine {
         fileName: String,
         referer: String? = null,
         headers: Map<String, String>? = null,
-        cookies: String? = null
+        cookies: String? = null,
+        domain: String? = null
     ): File? = withContext(Dispatchers.IO) {
         try {
-            val publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val emreGalleryDir = File(publicDownloads, "Emre Gallery")
-            if (!emreGalleryDir.exists()) {
-                emreGalleryDir.mkdirs()
-            }
-            val dir = if (emreGalleryDir.exists() && emreGalleryDir.canWrite()) {
-                emreGalleryDir
-            } else {
-                val appExternal = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                val fallbackFolder = File(appExternal ?: context.filesDir, "Emre Gallery")
-                if (!fallbackFolder.exists()) fallbackFolder.mkdirs()
-                fallbackFolder
-            }
+            val effectiveDomain = domain?.replace(Regex("[^a-zA-Z0-9.-]"), "_")?.trim()?.takeIf { it.isNotBlank() }
+                ?: OkHttpDownloader.extractDomain(referer ?: mediaUrl)
+            val dir = OkHttpDownloader.getTargetStorageDir(context, effectiveDomain)
 
             val sanitizedName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
             val targetFile = File(dir, "${System.currentTimeMillis()}_$sanitizedName")

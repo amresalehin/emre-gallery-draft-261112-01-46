@@ -38,7 +38,9 @@ data class ScrapedMediaItem(
     val provenance: MediaProvenance = MediaProvenance(extractorEngine = source),
     val metadata: Map<String, String> = emptyMap(),
     val downloadHeaders: Map<String, String> = emptyMap(),
-    val detectedAt: Long = System.currentTimeMillis()
+    val detectedAt: Long = System.currentTimeMillis(),
+    val width: Int? = null,
+    val height: Int? = null
 )
 
 data class ScrapeResult(

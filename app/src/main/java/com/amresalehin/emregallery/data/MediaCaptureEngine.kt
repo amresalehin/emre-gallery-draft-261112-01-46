@@ -63,7 +63,8 @@ object MediaCaptureEngine {
                     var img = images[i];
                     if (isChromeElement(img)) continue;
 
-                    var candidateUrls = [];
+                    var w = img.naturalWidth || img.width || 0;
+                    var h = img.naturalHeight || img.height || 0;
 
                     // Extract srcset highest resolution candidates
                     var srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset');
@@ -78,7 +79,7 @@ object MediaCaptureEngine {
                                 if (u && u.indexOf('data:') !== 0) {
                                     var absSrcset = resolveAbs(u);
                                     if (absSrcset) {
-                                        list.push({u: absSrcset, s: 'SRCSET', r: descriptor});
+                                        list.push({u: absSrcset, s: 'SRCSET', r: descriptor, w: w, h: h});
                                     }
                                 }
                             }
@@ -93,11 +94,11 @@ object MediaCaptureEngine {
 
                     if (dataSrc && dataSrc.indexOf('data:') !== 0) {
                         var absData = resolveAbs(dataSrc);
-                        if (absData) candidateUrls.push({u: absData, s: 'DATA_SRC'});
+                        if (absData) candidateUrls.push({u: absData, s: 'DATA_SRC', w: w, h: h});
                     }
                     if (rawSrc && rawSrc.indexOf('data:') !== 0) {
                         var absRaw = resolveAbs(rawSrc);
-                        if (absRaw) candidateUrls.push({u: absRaw, s: 'DOM'});
+                        if (absRaw) candidateUrls.push({u: absRaw, s: 'DOM', w: w, h: h});
                     }
 
                     for (var c = 0; c < candidateUrls.length; c++) {
@@ -109,6 +110,8 @@ object MediaCaptureEngine {
                 var videos = document.querySelectorAll('video');
                 for (var v = 0; v < videos.length; v++) {
                     var vid = videos[v];
+                    var vw = vid.videoWidth || vid.clientWidth || 0;
+                    var vh = vid.videoHeight || vid.clientHeight || 0;
                     var poster = resolveAbs(vid.getAttribute('poster') || vid.poster);
                     var chosenVideo = null;
                     if (vid.src && !vid.src.startsWith('blob:') && !vid.src.startsWith('data:')) {
@@ -124,7 +127,7 @@ object MediaCaptureEngine {
                         }
                     }
                     if (chosenVideo) {
-                        list.push({u: chosenVideo, s: 'DOM', p: poster, r: 'video'});
+                        list.push({u: chosenVideo, s: 'DOM', p: poster, r: 'video', w: vw, h: vh});
                     } else if (poster) {
                         list.push({u: poster, s: 'POSTER', r: 'poster'});
                     }
@@ -349,6 +352,22 @@ object MediaCaptureEngine {
                 var scrollHeight = doc.scrollHeight || 0;
                 var remaining = scrollHeight - (scrollY + innerHeight);
 
+                // Prune heavy media buffers in off-screen elements to prevent Chromium renderer OOM
+                var mediaEls = document.querySelectorAll('video, audio');
+                for (var i = 0; i < mediaEls.length; i++) {
+                    var m = mediaEls[i];
+                    if (!m.paused) { m.pause(); }
+                    m.preload = 'none';
+                    var rect = m.getBoundingClientRect();
+                    if (rect.bottom < -1500) {
+                        if (m.src && !m.dataset.prunedSrc) {
+                            m.dataset.prunedSrc = m.src;
+                            m.removeAttribute('src');
+                            m.load();
+                        }
+                    }
+                }
+
                 var scrollDelta = Math.max(innerHeight * 0.85, 400);
                 window.scrollBy({ top: scrollDelta, behavior: 'smooth' });
                 window.dispatchEvent(new Event('scroll'));
@@ -470,8 +489,40 @@ object MediaCaptureEngine {
                 domSelector = domSelector ?: if (source == ExtractionSource.NETWORK_INTERCEPT) "network_request" else null
             ),
             metadata = metadataMap,
-            downloadHeaders = headers
+            downloadHeaders = headers,
+            width = declaredWidth ?: extractDimension(resolutionHint, cleanedUrl, true),
+            height = declaredHeight ?: extractDimension(resolutionHint, cleanedUrl, false)
         )
+    }
+
+    /**
+     * Extracts width or height from resolution hints or URL dimension patterns.
+     */
+    fun extractDimension(resolutionHint: String?, url: String, isWidth: Boolean): Int? {
+        if (!resolutionHint.isNullOrBlank()) {
+            val dimMatch = "(\\d{2,5})\\s*[xX×]\\s*(\\d{2,5})".toRegex().find(resolutionHint)
+            if (dimMatch != null) {
+                return if (isWidth) dimMatch.groupValues[1].toIntOrNull() else dimMatch.groupValues[2].toIntOrNull()
+            }
+            if (isWidth) {
+                val wMatch = "(\\d{2,5})\\s*w".toRegex().find(resolutionHint)
+                if (wMatch != null) return wMatch.groupValues[1].toIntOrNull()
+            } else {
+                val hMatch = "(\\d{2,5})\\s*h".toRegex().find(resolutionHint)
+                if (hMatch != null) return hMatch.groupValues[1].toIntOrNull()
+                val pMatch = "(\\d{3,4})\\s*p".toRegex(RegexOption.IGNORE_CASE).find(resolutionHint)
+                if (pMatch != null) return pMatch.groupValues[1].toIntOrNull()
+            }
+        }
+        val urlMatch = "[_\\-=/](\\d{3,5})\\s*[xX×_]\\s*(\\d{3,5})[._\\-=/]".toRegex().find(url)
+        if (urlMatch != null) {
+            val w = urlMatch.groupValues[1].toIntOrNull()
+            val h = urlMatch.groupValues[2].toIntOrNull()
+            if (w != null && h != null && w in 40..10000 && h in 40..10000) {
+                return if (isWidth) w else h
+            }
+        }
+        return null
     }
 
     /**
@@ -609,13 +660,17 @@ object MediaCaptureEngine {
                     }
                     val poster = obj.optString("p", "").ifBlank { null }
                     val res = obj.optString("r", "").ifBlank { null }
+                    val dw = obj.optInt("w", 0).takeIf { it > 0 }
+                    val dh = obj.optInt("h", 0).takeIf { it > 0 }
                     val item = buildMediaItem(
                         rawUrl = rawUrl,
                         source = source,
                         baseUrl = baseUrl,
                         poster = poster,
                         resolutionHint = res,
-                        indexHint = i
+                        indexHint = i,
+                        declaredWidth = dw,
+                        declaredHeight = dh
                     )
                     if (item != null) {
                         results.add(item)

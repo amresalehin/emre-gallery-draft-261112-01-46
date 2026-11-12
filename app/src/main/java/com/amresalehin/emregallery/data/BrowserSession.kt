@@ -180,13 +180,18 @@ object BrowserSession {
 
             fun cleanup() {
                 try {
-                    mainHandler.removeCallbacksAndMessages(null)
-                    (webView?.parent as? ViewGroup)?.removeView(webView)
-                    webView?.stopLoading()
-                    webView?.removeJavascriptInterface("EmreBridge")
-                    webView?.webViewClient = WebViewClient()
-                    webView?.webChromeClient = WebChromeClient()
-                    webView?.destroy()
+                    val wv = webView ?: return
+                    (wv.parent as? ViewGroup)?.removeView(wv)
+                    wv.stopLoading()
+                    wv.loadUrl("about:blank")
+                    wv.clearHistory()
+                    wv.onPause()
+                    wv.removeJavascriptInterface("EmreBridge")
+                    wv.webViewClient = WebViewClient()
+                    wv.webChromeClient = WebChromeClient()
+                    wv.post {
+                        try { wv.destroy() } catch (_: Throwable) {}
+                    }
                 } catch (_: Throwable) {
                 } finally {
                     webView = null
@@ -206,6 +211,7 @@ object BrowserSession {
                 val viewWidth = if (displayMetrics.widthPixels > 0) displayMetrics.widthPixels else 1080
                 val viewHeight = if (displayMetrics.heightPixels > 0) displayMetrics.heightPixels else 1920
 
+                wv.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 if (act != null && !act.isFinishing && !act.isDestroyed) {
                     val root = act.findViewById<ViewGroup>(android.R.id.content)
                     if (root != null) {
@@ -401,12 +407,17 @@ object BrowserSession {
 
             fun cleanup() {
                 try {
-                    mainHandler.removeCallbacksAndMessages(null)
-                    (webView?.parent as? ViewGroup)?.removeView(webView)
-                    webView?.stopLoading()
-                    webView?.webViewClient = WebViewClient()
-                    webView?.webChromeClient = WebChromeClient()
-                    webView?.destroy()
+                    val wv = webView ?: return
+                    (wv.parent as? ViewGroup)?.removeView(wv)
+                    wv.stopLoading()
+                    wv.loadUrl("about:blank")
+                    wv.clearHistory()
+                    wv.onPause()
+                    wv.webViewClient = WebViewClient()
+                    wv.webChromeClient = WebChromeClient()
+                    wv.post {
+                        try { wv.destroy() } catch (_: Throwable) {}
+                    }
                 } catch (_: Throwable) {
                 } finally {
                     webView = null
@@ -457,6 +468,7 @@ object BrowserSession {
                 val wv = if (act != null) WebView(act) else WebView(context)
                 webView = wv
 
+                wv.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 if (act != null && !act.isFinishing && !act.isDestroyed) {
                     val root = act.findViewById<ViewGroup>(android.R.id.content)
                     if (root != null) {

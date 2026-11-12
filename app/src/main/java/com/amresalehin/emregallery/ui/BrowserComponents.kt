@@ -678,33 +678,32 @@ fun BrowserTopBar(
                 }
             }
 
-            // Discovered Media Download Icon (HIDDEN when search is focused)
+            // Discovered Media Count Badge (Shown ONLY when media has been detected or active deep scan)
             AnimatedVisibility(
-                visible = !isInputFocused,
+                visible = !isInputFocused && (discoveredCount > 0 || isDeepScanning),
                 enter = fadeIn(animationSpec = tween(150)) + expandHorizontally(animationSpec = tween(150)),
                 exit = fadeOut(animationSpec = tween(120)) + shrinkHorizontally(animationSpec = tween(120))
             ) {
                 IconButton(
                     onClick = onDiscoveredMediaClick,
                     modifier = Modifier
-                        .size(42.dp)
+                        .size(38.dp)
                         .testTag("top_bar_download_media_btn")
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         if (isDeepScanning) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(34.dp),
+                                modifier = Modifier.size(30.dp),
                                 strokeWidth = 2.dp,
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
                         if (discoveredCount > 0) {
-                            // When media counts are shown, show ONLY the counts and no icon
                             Surface(
                                 shape = CircleShape,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier
-                                    .size(28.dp)
+                                    .size(26.dp)
                                     .testTag("top_bar_media_count_badge")
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
@@ -717,16 +716,29 @@ fun BrowserTopBar(
                                     )
                                 }
                             }
-                        } else {
-                            // When no media counts, show android radar icon
-                            Icon(
-                                imageVector = Icons.Default.Radar,
-                                contentDescription = if (isDeepScanning) "Deep scanning media..." else "Discover media",
-                                tint = if (isDeepScanning) MaterialTheme.colorScheme.primary else BrowserThemeColors.iconTint(isDark),
-                                modifier = Modifier.size(24.dp)
-                            )
                         }
                     }
+                }
+            }
+
+            // Save to Pocket Icon on Top Bar (Replaces old radar icon)
+            AnimatedVisibility(
+                visible = !isInputFocused,
+                enter = fadeIn(animationSpec = tween(150)) + expandHorizontally(animationSpec = tween(150)),
+                exit = fadeOut(animationSpec = tween(120)) + shrinkHorizontally(animationSpec = tween(120))
+            ) {
+                IconButton(
+                    onClick = { onSaveToPocket?.invoke() },
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("top_bar_save_to_pocket_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Bookmark,
+                        contentDescription = "Save to Pocket",
+                        tint = BrowserThemeColors.iconTint(isDark),
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
 
@@ -921,7 +933,7 @@ fun BrowserTopBar(
                                         }
                                     }
                                     else -> {
-                                        Icon(Icons.Default.Radar, contentDescription = null, tint = BrowserThemeColors.iconTint(isDark))
+                                        Icon(Icons.Default.TravelExplore, contentDescription = null, tint = BrowserThemeColors.iconTint(isDark))
                                     }
                                 }
                             },

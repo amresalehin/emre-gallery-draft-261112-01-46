@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import android.view.LayoutInflater
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -38,9 +39,11 @@ import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import com.amresalehin.emregallery.R
 import com.amresalehin.emregallery.data.OkHttpDownloader
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -138,7 +141,10 @@ fun rememberViewerVideoState(
                 }
                 .build()
 
-            ExoPlayer.Builder(context)
+            val renderersFactory = DefaultRenderersFactory(context)
+                .setEnableDecoderFallback(true)
+
+            ExoPlayer.Builder(context, renderersFactory)
                 .setMediaSourceFactory(mediaSourceFactory)
                 .setLoadControl(loadControl)
                 .build().apply {
@@ -181,13 +187,20 @@ fun rememberViewerVideoState(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                android.util.Log.w("ViewerVideoPlayer", "Playback error encountered: ${error.message}. Retrying prepare.")
-                player?.prepare()
+                android.util.Log.w("ViewerVideoPlayer", "Playback error encountered: ${error.message} (${error.errorCodeName})")
+                val cause = error.cause
+                if (cause is androidx.media3.exoplayer.video.MediaCodecVideoDecoderException ||
+                    cause is IllegalStateException) {
+                    player?.clearVideoSurface()
+                } else {
+                    player?.prepare()
+                }
             }
         }
         player?.addListener(listener)
         onDispose {
             player?.removeListener(listener)
+            player?.clearVideoSurface()
             player?.stop()
             player?.release()
         }
@@ -227,6 +240,7 @@ fun rememberViewerVideoState(
 
 /**
  * AndroidView host for ExoPlayer rendering within the HorizontalPager.
+ * Uses TextureView under the hood to ensure seamless Compose alpha animation and avoid SurfaceView release crashes.
  */
 @Composable
 fun VideoPlayerSurface(
@@ -236,7 +250,6 @@ fun VideoPlayerSurface(
     if (!videoState.isVideo || videoState.player == null) return
 
     // Keep the cached poster underneath and fade the first rendered video frame in over it.
-    // SurfaceView alpha is supported on API 26+, which is this app's minimum Android version.
     val surfaceAlpha by animateFloatAsState(
         targetValue = if (videoState.isFirstFrameRendered) 1f else 0f,
         animationSpec = tween(durationMillis = 180),
@@ -245,7 +258,9 @@ fun VideoPlayerSurface(
 
     AndroidView(
         factory = { ctx ->
-            PlayerView(ctx).apply {
+            val pv = LayoutInflater.from(ctx)
+                .inflate(R.layout.item_viewer_player, null, false) as PlayerView
+            pv.apply {
                 player = videoState.player
                 useController = false
                 setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
@@ -265,6 +280,12 @@ fun VideoPlayerSurface(
             pv.useController = false
             pv.setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
             pv.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+        },
+        onRelease = { pv ->
+            pv.player = null
+        },
+        onReset = { pv ->
+            pv.player = null
         }
     )
 }

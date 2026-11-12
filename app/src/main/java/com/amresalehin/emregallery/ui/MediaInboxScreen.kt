@@ -15,9 +15,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.TravelExplore
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,9 +35,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.amresalehin.emregallery.data.BrowserSession
+import com.amresalehin.emregallery.data.DiscoveryFilterManager
+import com.amresalehin.emregallery.data.DiscoveryFilterState
 import com.amresalehin.emregallery.data.DownloadQueueManager
 import com.amresalehin.emregallery.data.DownloaderSession
 import com.amresalehin.emregallery.data.MediaInboxStack
+import com.amresalehin.emregallery.data.OkHttpDownloader
 import com.amresalehin.emregallery.data.ScrapedMediaItem
 
 enum class DownloaderViewMode {
@@ -97,14 +103,27 @@ fun DiscoveredMediaPage(
     BackHandler { onBack() }
 
     val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        DiscoveryFilterManager.init(context)
+    }
+
+    val filterState by DiscoveryFilterManager.filterState.collectAsState()
+    var showFilterSheet by remember { mutableStateOf(false) }
+
     val tabSession = remember { BrowserSession.getTabSession("tab_main") }
     val tabItems by tabSession.detectedItems.collectAsState()
     val sessionItems by DownloaderSession.discoveredItems.collectAsState()
     val sourceUrl by DownloaderSession.currentUrl.collectAsState()
     val sourceDomain by DownloaderSession.sourceDomain.collectAsState()
 
-    val discoveredItems = remember(tabItems, sessionItems) {
+    val rawDiscoveredItems = remember(tabItems, sessionItems) {
         (sessionItems + tabItems).distinctBy { it.id.ifBlank { it.url } }
+    }
+
+    val discoveredItems = remember(rawDiscoveredItems, filterState) {
+        rawDiscoveredItems.filter { item ->
+            DiscoveryFilterManager.matchesFilters(item, filterState)
+        }
     }
 
     var selectedFilter by remember { mutableStateOf("All") }
@@ -124,13 +143,19 @@ fun DiscoveredMediaPage(
     }
 
     fun downloadItem(item: ScrapedMediaItem) {
+        val effectiveDomain = sourceDomain.ifBlank {
+            item.provenance.pageUrl.ifBlank { sourceUrl }.let { url ->
+                OkHttpDownloader.extractDomain(url.ifBlank { item.url })
+            }
+        }.ifBlank { "general" }
+
         DownloadQueueManager.enqueueDownload(
             context = context,
             item = item,
             referer = sourceUrl,
             stackId = "discovered_${sourceUrl.hashCode()}",
-            stackTitle = sourceDomain.ifBlank { "Discovered Media" },
-            sourceDomain = sourceDomain,
+            stackTitle = effectiveDomain,
+            sourceDomain = effectiveDomain,
             sourceUrl = sourceUrl
         )
     }
@@ -152,7 +177,7 @@ fun DiscoveredMediaPage(
             .background(MaterialTheme.colorScheme.background)
             .testTag("discovered_media_page")
     ) {
-        // Top app bar with back button, dynamic item count, and Select All toggle
+        // Top app bar with back button, filter button, deep scan, and Select All toggle (completely clean & clear)
         Surface(
             color = MaterialTheme.colorScheme.background,
             modifier = Modifier.fillMaxWidth().statusBarsPadding()
@@ -175,24 +200,35 @@ fun DiscoveredMediaPage(
                     )
                 }
 
-                Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
-                    Text(
-                        text = "Choose Media to Download",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = if (discoveredItems.isEmpty()) {
-                            "0 available media options"
-                        } else if (selectedIds.isEmpty()) {
-                            "${discoveredItems.size} options available"
-                        } else {
-                            "${selectedIds.size} of ${discoveredItems.size} selected"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                // Completely clean & clear center area (removed 'Choose media to download' heading and description)
+                Spacer(modifier = Modifier.weight(1f))
+
+                // Filter icon button to open drawer sheet for discovery filters
+                IconButton(
+                    onClick = { showFilterSheet = true },
+                    modifier = Modifier.testTag("discovered_media_filter_btn")
+                ) {
+                    val isModified = filterState.minWidth != 480 ||
+                            filterState.minHeight != 540 ||
+                            filterState.minSizeBytes != 10 * 1024L ||
+                            filterState.enabledFormats != DiscoveryFilterState.DEFAULT_ENABLED_FORMATS
+
+                    BadgedBox(
+                        badge = {
+                            if (isModified) {
+                                Badge(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(6.dp)
+                                )
+                            }
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "Filter Media Discoveries",
+                            tint = if (isModified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
 
                 if (onDeepScanClick != null) {
@@ -209,7 +245,7 @@ fun DiscoveredMediaPage(
                                 )
                             }
                             Icon(
-                                imageVector = Icons.Default.Radar,
+                                imageVector = Icons.Default.TravelExplore,
                                 contentDescription = if (isDeepScanning) "Stop deep scan" else "Run deep scan",
                                 tint = if (isDeepScanning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                             )
@@ -274,27 +310,74 @@ fun DiscoveredMediaPage(
                     .padding(28.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.Image,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(48.dp)
-                    )
-                    Spacer(Modifier.height(14.dp))
-                    Text(
-                        text = "No media detected on this page yet",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "Browse pages containing videos, audio, or images and detected options will dynamically appear here for selection.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
+                if (rawDiscoveredItems.isNotEmpty()) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FilterList,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(52.dp)
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            text = "All media hidden by active filters",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "${rawDiscoveredItems.size} items were detected on this page, but are hidden by the current filter rules (Min: ${filterState.minWidth}x${filterState.minHeight}px, PNG/SVG disabled).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(
+                                onClick = { showFilterSheet = true },
+                                modifier = Modifier.testTag("empty_state_adjust_filters_btn")
+                            ) {
+                                Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Adjust Filters")
+                            }
+                            OutlinedButton(
+                                onClick = { DiscoveryFilterManager.resetToDefaults() },
+                                modifier = Modifier.testTag("empty_state_reset_filters_btn")
+                            ) {
+                                Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Reset")
+                            }
+                        }
+                    }
+                } else {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Image,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            text = "No media detected on this page yet",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Browse pages containing videos, audio, or images and detected options will dynamically appear here for selection.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
             }
         } else {
@@ -363,15 +446,19 @@ fun DiscoveredMediaPage(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        val displayFormat = DiscoveryFilterManager.normalizeFormat(item)
                                         Text(
-                                            text = if (item.isVideo || item.isStream) "Video" else if (item.isAudio) "Audio" else item.format.ifBlank { "Image" },
+                                            text = if (item.isVideo || item.isStream) "Video ($displayFormat)" else if (item.isAudio) "Audio ($displayFormat)" else displayFormat,
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.SemiBold,
                                             color = MaterialTheme.colorScheme.primary
                                         )
-                                        item.resolutionHint?.takeIf { it.isNotBlank() }?.let { res ->
+                                        val dim = if (item.width != null && item.height != null) {
+                                            "${item.width}x${item.height} px"
+                                        } else item.resolutionHint?.takeIf { it.isNotBlank() }
+                                        if (dim != null) {
                                             Text(
-                                                text = "• $res",
+                                                text = "• $dim",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -455,6 +542,17 @@ fun DiscoveredMediaPage(
                     }
                 }
             }
+        }
+
+        if (showFilterSheet) {
+            DiscoveryFilterBottomSheet(
+                filterState = filterState,
+                matchingCount = discoveredItems.size,
+                onFilterChange = { newFilter ->
+                    DiscoveryFilterManager.updateFilters(newFilter)
+                },
+                onDismissRequest = { showFilterSheet = false }
+            )
         }
     }
 }

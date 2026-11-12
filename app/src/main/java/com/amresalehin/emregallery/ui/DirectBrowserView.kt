@@ -44,6 +44,7 @@ import android.os.Build
 import com.amresalehin.emregallery.data.AdBlockEngine
 import com.amresalehin.emregallery.data.BotDetectionMitigator
 import com.amresalehin.emregallery.data.BrowserHistoryManager
+import com.amresalehin.emregallery.data.RamGovernor
 import com.amresalehin.emregallery.data.BrowserSession
 import com.amresalehin.emregallery.data.BrowserShortcut
 import com.amresalehin.emregallery.data.BrowserTabItem
@@ -125,6 +126,7 @@ fun DirectBrowserView(
     var isDesktopMode by remember { mutableStateOf(false) }
 
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+    var webViewRecreateEpoch by remember { mutableIntStateOf(0) }
 
     // Dialog & Sheet States
     var showAddShortcutDialog by remember { mutableStateOf(false) }
@@ -210,9 +212,13 @@ fun DirectBrowserView(
         onDispose {
             webViewInstance?.let { wv ->
                 wv.stopLoading()
+                wv.loadUrl("about:blank")
+                wv.onPause()
                 wv.webViewClient = WebViewClient()
                 wv.webChromeClient = WebChromeClient()
-                wv.destroy()
+                wv.post {
+                    try { wv.destroy() } catch (_: Throwable) {}
+                }
                 webViewInstance = null
             }
         }
@@ -702,15 +708,23 @@ fun DirectBrowserView(
                     .fillMaxWidth()
             ) {
                 // Interactive WebView (always instantiated for high-speed responsiveness)
-                AndroidView(
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            webViewInstance = this
-                            BrowserSession.activeWebView = this
+                key(webViewRecreateEpoch) {
+                    AndroidView(
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                webViewInstance = this
+                                BrowserSession.activeWebView = this
                             layoutParams = android.view.ViewGroup.LayoutParams(
                                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
                             )
+
+                            setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+                                scrollHandler.onScroll(scrollY, oldScrollY)
+                                if (RamGovernor.isHeapLimitExceeded()) {
+                                    RamGovernor.enforceLimit(context, this)
+                                }
+                            }
 
                             setBackgroundColor(if (isDark) android.graphics.Color.parseColor("#111111") else android.graphics.Color.WHITE)
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -727,7 +741,7 @@ fun DirectBrowserView(
                                 displayZoomControls = false
                                 useWideViewPort = true
                                 loadWithOverviewMode = true
-                                mediaPlaybackRequiresUserGesture = false
+                                mediaPlaybackRequiresUserGesture = true
                                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                                 userAgentString = BotDetectionMitigator.STEALTH_USER_AGENT
                             }
@@ -950,12 +964,15 @@ fun DirectBrowserView(
                                     if (webViewInstance === view) {
                                         webViewInstance = null
                                     }
+                                    RamGovernor.enforceLimit(context, null)
+                                    webViewRecreateEpoch++
                                     return true
                                 }
                             }
 
-                            if (startUrl.isNotBlank()) {
-                                loadUrl(startUrl)
+                            val initialToLoad = currentUrl.ifBlank { startUrl }
+                            if (initialToLoad.isNotBlank() && initialToLoad != "about:blank") {
+                                loadUrl(initialToLoad)
                             }
                         }
                     },
@@ -969,9 +986,13 @@ fun DirectBrowserView(
                     },
                     onRelease = { wv ->
                         wv.stopLoading()
+                        wv.loadUrl("about:blank")
+                        wv.onPause()
                         wv.webViewClient = WebViewClient()
                         wv.webChromeClient = WebChromeClient()
-                        wv.destroy()
+                        wv.post {
+                            try { wv.destroy() } catch (_: Throwable) {}
+                        }
                         if (webViewInstance === wv) {
                             webViewInstance = null
                         }
@@ -980,6 +1001,7 @@ fun DirectBrowserView(
                         .fillMaxSize()
                         .testTag("browser_webview_canvas")
                 )
+            }
 
                 // 2. Minimalist Monochrome Mobile Browser Home Layout (blank when empty)
                 if (currentUrl.isBlank()) {
