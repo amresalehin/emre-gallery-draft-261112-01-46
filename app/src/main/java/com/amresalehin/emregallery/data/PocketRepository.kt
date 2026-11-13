@@ -491,7 +491,8 @@ class PocketRepository(
                                 isStream = itmObj.optBoolean("isStream", false),
                                 format = itmObj.optString("format", ""),
                                 sizeBytes = itmObj.optLong("sizeBytes", 0L),
-                                dateAddedMillis = itmObj.optLong("dateAddedMillis", System.currentTimeMillis())
+                                dateAddedMillis = itmObj.optLong("dateAddedMillis", System.currentTimeMillis()),
+                                thumbnailUrl = itmObj.optString("thumbnailUrl", "")
                             )
                         )
                     }
@@ -587,6 +588,9 @@ class PocketRepository(
                             put("format", itm.format)
                             put("sizeBytes", itm.sizeBytes)
                             put("dateAddedMillis", itm.dateAddedMillis)
+                            if (itm.thumbnailUrl.isNotBlank()) {
+                                put("thumbnailUrl", itm.thumbnailUrl)
+                            }
                         }
                         itemsArr.put(itmObj)
                     }
@@ -734,7 +738,8 @@ class PocketRepository(
                         isAudio = item.isAudio,
                         isStream = item.isStream,
                         format = item.format,
-                        sizeBytes = item.sizeBytes ?: 0L
+                        sizeBytes = item.sizeBytes ?: 0L,
+                        thumbnailUrl = item.thumbnailUrl.orEmpty()
                     )
                 }.filterNot { it.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true) }
 
@@ -747,7 +752,8 @@ class PocketRepository(
 
                 val newPreview = when {
                     meta.previewImageUrl.isNotBlank() -> meta.previewImageUrl
-                    newItems.isNotEmpty() -> newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                    newItems.isNotEmpty() -> newItems.firstNotNullOfOrNull { it.thumbnailUrl.takeIf { t -> t.isNotBlank() } }
+                        ?: newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
                         ?: newItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
                         ?: latest.previewImageUrl
                     else -> latest.previewImageUrl
@@ -764,10 +770,33 @@ class PocketRepository(
                 )
 
                 DownloadActivityManager.initialize(context)
-                val protectedKeys = latest.items
+                val protectedSignals = mutableSetOf<String>()
+                fun recordProtectedSignals(
+                    url: String,
+                    isVideo: Boolean,
+                    isAudio: Boolean,
+                    isStream: Boolean,
+                    thumbUrl: String = ""
+                ) {
+                    if (url.isBlank()) return
+                    protectedSignals.add(MediaClassifier.deduplicationKey(url))
+                    if (isVideo || isStream) {
+                        MediaClassifier.videoStemKey(url)?.let { protectedSignals.add(it) }
+                        MediaClassifier.extractTwitterVideoKey(url)?.let { protectedSignals.add(it) }
+                        val (gvId, _) = MediaClassifier.extractGoogleVideoIdAndItag(url)
+                        if (!gvId.isNullOrBlank()) protectedSignals.add("gv:$gvId")
+                        val ytId = MediaClassifier.extractYouTubeVideoId(thumbUrl)
+                            ?: MediaClassifier.extractYouTubeVideoId(url)
+                            ?: MediaClassifier.extractYouTubeVideoId(targetUrl)
+                        if (!ytId.isNullOrBlank()) protectedSignals.add("ytvid:${ytId.lowercase(Locale.ROOT)}")
+                    }
+                    MediaClassifier.specificMediaStemKey(url, isVideo || isStream, isAudio)?.let {
+                        protectedSignals.add(it)
+                    }
+                }
+                latest.items
                     .filter { it.localUri.isNotBlank() }
-                    .map { MediaClassifier.deduplicationKey(it.sourceUrl) }
-                    .toMutableSet()
+                    .forEach { recordProtectedSignals(it.sourceUrl, it.isVideo, it.isAudio, it.isStream, it.thumbnailUrl) }
                 DownloadActivityManager.activities.value
                     .filter {
                         it.status == DownloadActivityStatus.DOWNLOADING ||
@@ -776,11 +805,21 @@ class PocketRepository(
                         it.status == DownloadActivityStatus.FINISHED
                     }
                     .forEach { activity ->
-                        protectedKeys.add(MediaClassifier.deduplicationKey(activity.mediaUrl))
+                        recordProtectedSignals(activity.mediaUrl, activity.isVideo, activity.isAudio, activity.isStream, activity.thumbnailUrl.orEmpty())
                     }
 
                 val queueItems = MediaClassifier.deduplicateScrapedItems(discovery.items)
-                    .filter { MediaClassifier.deduplicationKey(it.url) !in protectedKeys }
+                    .filter { candidate ->
+                        val candKey = MediaClassifier.deduplicationKey(candidate.url)
+                        if (candKey in protectedSignals) return@filter false
+                        val platIds = MediaClassifier.extractVideoPlatformIdentity(candidate)
+                        if (platIds.any { it in protectedSignals }) return@filter false
+                        val vidStem = if (candidate.isVideo || candidate.isStream) MediaClassifier.videoStemKey(candidate.url) else null
+                        if (vidStem != null && vidStem in protectedSignals) return@filter false
+                        val specStem = MediaClassifier.specificMediaStemKey(candidate.url, candidate.isVideo || candidate.isStream, candidate.isAudio)
+                        if (specStem != null && specStem in protectedSignals) return@filter false
+                        true
+                    }
                 if (queueItems.isNotEmpty()) {
                     DownloadQueueManager.enqueueBatch(
                         context = context,

@@ -1,9 +1,12 @@
 package com.amresalehin.emregallery.data
 
+import java.io.File
 import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 
 /**
@@ -53,6 +56,47 @@ object MediaClassifier {
     private val STREAMING_SLICE_PARAMS = setOf(
         "range", "bytestart", "byteend", "bytes", "rn", "sq", "live", "cpn", "sver", "chunk", "seg", "part"
     )
+
+    // Ephemeral CDN authentication, cache-edge, signature, and session parameters that change across
+    // extraction engines or page reloads without changing the underlying media asset.
+    private val EPHEMERAL_CDN_QUERY_PARAMS = setOf(
+        // Instagram / Meta / Facebook CDNs (fbcdn.net, cdninstagram.com)
+        "oh", "oe", "_nc_ht", "_nc_cat", "_nc_ohc", "_nc_sid", "_nc_oc", "_nc_ad",
+        "_nc_rid", "_nc_gid", "_nc_eui2", "_nc_vs", "_nc_pt", "_nc_x", "ccb", "efg",
+        "ig_cache_key", "stp", "se",
+        // TikTok CDNs
+        "x-expires", "x-signature", "lr", "cd", "cv", "br", "bt", "cs", "ds", "ft", "l",
+        "mime_type", "ply_type", "policy", "qs", "rc", "tk", "u0", "vl", "vr",
+        "btag", "ch", "cr", "dr", "er", "shcp", "shp", "biz_tag",
+        // CloudFront / S3 / Akamai / Fastly / Bunny / Vimeo / YouTube / Generic signed CDNs
+        "expires", "expire", "exp", "signature", "sig", "lsig", "key-pair-id",
+        "hdnts", "hdnea", "verify", "hmac", "auth", "st", "ts", "clen", "gir",
+        "lmt", "dur", "ei", "mv", "mvi", "pl", "txp", "ratebypass", "requiressl",
+        "sparams", "ip", "ipbits", "__gda__", "rs", "sqp", "algo", "t", "e", "h", "hash",
+        "n", "alr", "c", "cver", "fexp", "fvip", "keepalive", "nh", "aitags",
+        "initcwndbps", "mn", "mm", "ms", "mt", "source_ve_path"
+    )
+
+    // YouTube adaptive audio-only itags (DASH M4A / WebM Opus / xHE-AAC)
+    private val YOUTUBE_AUDIO_ONLY_ITAGS = setOf(
+        "139", "140", "141", "171", "172", "249", "250", "251", "599", "600"
+    )
+
+    // YouTube muxed audio+video itags
+    private val YOUTUBE_MUXED_ITAGS = setOf(
+        "18", "22", "37", "38", "43", "44", "45", "46"
+    )
+
+    private val GENERIC_STEM_NAMES = setOf(
+        "", "image", "img", "photo", "pic", "picture", "logo", "icon", "thumb",
+        "thumbnail", "poster", "preview", "cover", "banner", "default", "avatar",
+        "1", "0", "2", "media", "view", "get", "fetch", "video", "vid", "clip",
+        "stream", "playlist", "master", "index", "manifest", "chunklist", "hls",
+        "dash", "output", "download", "file", "asset", "attachment", "untitled",
+        "videoplayback", "dashplaylist", "hlsplaylist"
+    )
+
+    private val fileSha256Cache = ConcurrentHashMap<String, String>()
 
     /**
      * Checks if a string is a substantial, legitimate Base64 inline data URI (e.g. artwork, canvas exports),
@@ -889,6 +933,11 @@ object MediaClassifier {
                 .replace(Regex("""https?://preview\.redd\.it/"""), "https://i.redd.it/")
                 .replace(Regex("""https?://external-preview\.redd\.it/"""), "https://i.redd.it/")
                 .replace(Regex("""https?://i[0-3]\.wp\.com/"""), "https://i.wp.com/")
+                .replace(Regex("""https?://scontent[a-z0-9.-]*\.fbcdn\.net/"""), "https://scontent.fbcdn.net/")
+                .replace(Regex("""https?://video[a-z0-9.-]*\.fbcdn\.net/"""), "https://video.fbcdn.net/")
+                .replace(Regex("""https?://scontent[a-z0-9.-]*\.cdninstagram\.com/"""), "https://scontent.cdninstagram.com/")
+                .replace(Regex("""https?://v\d+[a-z0-9-]*\.tiktokcdn(?:-[a-z0-9-]+)?\.com/"""), "https://tiktokcdn.com/")
+                .replace(Regex("""https?://p\d+[a-z0-9-]*\.tiktokcdn(?:-[a-z0-9-]+)?\.com/"""), "https://p-tiktokcdn.com/")
 
             // 1. Pinterest Deduplication Key: Content-addressable 32-hex hash
             if (normalizedHostAndPath.contains("pinimg.com")) {
@@ -914,6 +963,32 @@ object MediaClassifier {
                 val itag = qParams["itag"] ?: ""
                 if (videoId.isNotBlank()) {
                     return "googlevideo:${videoId}_itag_$itag"
+                }
+            }
+
+            // 1d. Twitter / X video variants (video.twimg.com/(ext_tw_video|amplify_video|tweet_video)/<id>/...)
+            extractTwitterVideoKey(normalizedHostAndPath)?.let { twKey ->
+                return twKey
+            }
+
+            // 1e. Reddit video/manifest variants (v.redd.it/<postId>/DASH_720.mp4, CMAF_1080.mp4, HLSPlaylist.m3u8, DASHPlaylist.mpd)
+            // Keep DASH_AUDIO / CMAF_AUDIO distinct so companion audio folding still treats them as audio.
+            val vRedditMatch = Regex("""^https?://v\.redd\.it/([a-zA-Z0-9_-]+)/([^/]+)$""").find(normalizedHostAndPath)
+            if (vRedditMatch != null) {
+                val postId = vRedditMatch.groupValues[1]
+                val fileName = vRedditMatch.groupValues[2]
+                val isAudioTrack = fileName.startsWith("dash_audio", ignoreCase = true) ||
+                    fileName.startsWith("dash-audio", ignoreCase = true) ||
+                    fileName.startsWith("cmaf_audio", ignoreCase = true) ||
+                    fileName.startsWith("cmaf-audio", ignoreCase = true)
+                val isVideoVariant = !isAudioTrack && (
+                    fileName.startsWith("dash_", ignoreCase = true) ||
+                        fileName.startsWith("cmaf_", ignoreCase = true) ||
+                        fileName == "hlsplaylist.m3u8" ||
+                        fileName == "dashplaylist.mpd"
+                    )
+                if (isVideoVariant) {
+                    return "vreddit:$postId"
                 }
             }
 
@@ -952,9 +1027,9 @@ object MediaClassifier {
                 ".$1"
             )
 
-            // 7. Generic path folder dimension descriptors (e.g. /736x/, /236x/, /474x/, /1200x/, /300x200/, /w1200/, /h800/)
+            // 7. Generic path folder dimension & video-quality descriptors (e.g. /736x/, /300x200/, /w1200/, /720p/, /1080p/)
             normalizedHostAndPath = normalizedHostAndPath.replace(
-                Regex("""/(?:\d{2,5}x\d{0,5}|\d{0,5}x\d{2,5}|w\d{2,5}|h\d{2,5}|s\d{2,5}|width[_-]\d+|height[_-]\d+)/"""),
+                Regex("""/(?:\d{2,5}x\d{0,5}|\d{0,5}x\d{2,5}|w\d{2,5}|h\d{2,5}|s\d{2,5}|width[_-]\d+|height[_-]\d+|(?:144|240|360|480|540|720|1080|1440|2160)p|4k)/"""),
                 "/"
             )
 
@@ -964,9 +1039,20 @@ object MediaClassifier {
                 .replace(Regex("""/(?:[a-z]_[a-zA-Z0-9_-]+,?)+/"""), "/")
 
             // 9. Strip video quality / transcode suffixes to deduplicate multiple transcode qualities of same video
-            val videoQualityRegex = Regex("""(?:\.(?:144|240|360|480|720|1080|1440|2160)p(?:\.vp9|\.av1)?|[._-](?:144|240|360|480|720|1080|1440|2160)p)\.(webm|mp4|mkv)$""", RegexOption.IGNORE_CASE)
-            val normalizedVideoPath = videoQualityRegex.replace(normalizedHostAndPath) { match ->
-                "." + match.groupValues[1]
+            val videoQualityRegex = Regex(
+                """^(.{3,}?)(?:\.(?:144|240|360|480|540|720|1080|1440|2160)p(?:\.vp9|\.av1)?|[._-](?:144|240|360|480|540|720|1080|1440|2160)p|_(?:4k|hd|sd|hq|lq|high|med|medium|low|orig|original|source|720|1080|480|360))\.(webm|mp4|mkv|mov|m4v)$""",
+                RegexOption.IGNORE_CASE
+            )
+            val normalizedVideoPath = run {
+                val lastSlash = normalizedHostAndPath.lastIndexOf('/')
+                if (lastSlash != -1) {
+                    val prefix = normalizedHostAndPath.substring(0, lastSlash + 1)
+                    val filePart = normalizedHostAndPath.substring(lastSlash + 1)
+                    val replacedFile = videoQualityRegex.replace(filePart) { match ->
+                        "${match.groupValues[1]}.${match.groupValues[2]}"
+                    }
+                    prefix + replacedFile
+                } else normalizedHostAndPath
             }
 
             val pathSegment = normalizedVideoPath.substringAfterLast('/')
@@ -993,30 +1079,51 @@ object MediaClassifier {
             )
 
             // Identifying parameters that represent distinct resources and must NEVER be stripped
-            val identifyingParams = setOf(
-                "id", "v", "vid", "video_id", "file", "filename", "name", "token", "item", "key",
+            val strictIdentifyingParams = setOf(
+                "id", "v", "vid", "video_id", "file", "filename", "name", "item",
                 "url", "media", "uuid", "guid", "asset", "photo_id", "docid", "user", "uid", "post_id"
             )
+            val authOrKeyParams = setOf("token", "key")
 
             val isGenericPath = pathSegment.isBlank() || pathSegment in genericFileNames || !pathSegment.contains('.')
+            val isTwimgHost = normalizedFormatPath.contains("twimg.com/")
 
             val filteredQuery = if (queryPart.isNotBlank()) {
                 val params = queryPart.split("&").filter { it.isNotBlank() }
-                val hasIdentifyingParam = params.any {
-                    identifyingParams.contains(it.substringBefore("=").lowercase(Locale.ROOT))
+                val paramKeys = params.map { it.substringBefore("=").lowercase(Locale.ROOT) }
+                val hasIdentifyingParam = paramKeys.any {
+                    strictIdentifyingParams.contains(it) || (isGenericPath && authOrKeyParams.contains(it))
+                }
+                val hasEphemeralCdnParam = paramKeys.any {
+                    EPHEMERAL_CDN_QUERY_PARAMS.contains(it) || it.startsWith("_nc_") || it.startsWith("x-amz-") || it.startsWith("x-goog-")
                 }
                 params.filter { param ->
                     val key = param.substringBefore("=").lowercase(Locale.ROOT)
-                    // 1. Strip only tracking parameters
-                    if (TRACKING_QUERY_PARAMS.contains(key)) return@filter false
-                    // 2. Identifying parameters are strictly preserved
-                    if (identifyingParams.contains(key)) return@filter true
-                    // 3. CDN sizing parameters are stripped to group size variants together,
+                    val valPart = param.substringAfter("=", "")
+                    // 1. Strip tracking and ephemeral CDN auth/session parameters
+                    if (TRACKING_QUERY_PARAMS.contains(key) ||
+                        EPHEMERAL_CDN_QUERY_PARAMS.contains(key) ||
+                        key.startsWith("utm_") ||
+                        key.startsWith("_nc_") ||
+                        key.startsWith("x-amz-") ||
+                        key.startsWith("x-goog-")
+                    ) {
+                        return@filter false
+                    }
+                    if (isTwimgHost && key == "tag") return@filter false
+
+                    // 2. Strict identifying parameters are strictly preserved
+                    if (strictIdentifyingParams.contains(key)) return@filter true
+
+                    // 3. Token/Key: strip when used as CDN HMAC auth on concrete media files, keep on generic endpoints
+                    if (authOrKeyParams.contains(key)) {
+                        val isEphemeralAuthToken = !isGenericPath && (hasEphemeralCdnParam || valPart.length >= 24)
+                        return@filter !isEphemeralAuthToken
+                    }
+
+                    // 4. CDN sizing parameters are stripped to group size variants together,
                     // UNLESS the path is a generic endpoint without identifying params (over-merging guard)
                     if (sizingParams.contains(key)) {
-                        // Retain sizing keys only for generic, non-identified endpoints.
-                        // Concrete media paths drop resize/format parameters so CDN
-                        // variants of the same asset share one canonical key.
                         return@filter isGenericPath && !hasIdentifyingParam
                     }
                     true
@@ -1138,15 +1245,29 @@ object MediaClassifier {
             return aSize.compareTo(bSize)
         }
 
-        // 5. Format preference for master downloads (JPEG / JPG / PNG over lossy WEBP / AVIF)
-        val formatPriority = mapOf("PNG" to 4, "JPEG" to 3, "JPG" to 3, "WEBP" to 2, "AVIF" to 1)
+        // 5. Direct playable video file beats adaptive manifest (.m3u8/.mpd) when resolution & size are equal
+        if (a.isVideo && b.isVideo && a.isStream != b.isStream) {
+            return if (!a.isStream) 1 else -1
+        }
+
+        // 6. Format preference for master downloads (JPEG / JPG / PNG over lossy WEBP / AVIF)
+        val formatPriority = mapOf("PNG" to 4, "JPEG" to 3, "JPG" to 3, "WEBP" to 2, "AVIF" to 1, "MP4" to 4, "MOV" to 3, "WEBM" to 2)
         val aFmt = formatPriority[a.format.uppercase(Locale.ROOT)] ?: 0
         val bFmt = formatPriority[b.format.uppercase(Locale.ROOT)] ?: 0
         if (aFmt != bFmt) {
             return aFmt.compareTo(bFmt)
         }
 
-        // 6. Prefer candidate with existing thumbnail preview
+        // 7. Prefer muxed YouTube itag over adaptive video-only if pixel area & size tied
+        val aItag = extractGoogleVideoIdAndItag(a.url).second
+        val bItag = extractGoogleVideoIdAndItag(b.url).second
+        val aMuxed = aItag in YOUTUBE_MUXED_ITAGS
+        val bMuxed = bItag in YOUTUBE_MUXED_ITAGS
+        if (aMuxed != bMuxed) {
+            return if (aMuxed) 1 else -1
+        }
+
+        // 8. Prefer candidate with existing thumbnail preview
         if (a.thumbnailUrl != null && b.thumbnailUrl == null) return 1
         if (a.thumbnailUrl == null && b.thumbnailUrl != null) return -1
 
@@ -1156,6 +1277,221 @@ object MediaClassifier {
     private fun youtubeSourceId(item: ScrapedMediaItem): String? {
         val candidates = listOf(item.provenance.pageUrl, item.metadata["source_url"].orEmpty(), item.metadata["webpage_url"].orEmpty(), item.url)
         return candidates.asSequence().mapNotNull { extractYouTubeVideoId(it) }.firstOrNull()
+    }
+
+    private fun youtubeSpecificItemId(item: ScrapedMediaItem): String? {
+        val candidates = listOfNotNull(
+            item.metadata["source_url"],
+            item.metadata["webpage_url"],
+            item.thumbnailUrl,
+            item.url,
+            item.provenance.pageUrl
+        )
+        return candidates.asSequence().mapNotNull { extractYouTubeVideoId(it) }.firstOrNull()
+    }
+
+    internal fun extractGoogleVideoIdAndItag(url: String?): Pair<String?, String?> {
+        if (url.isNullOrBlank()) return null to null
+        val lower = url.lowercase(Locale.ROOT)
+        if (!lower.contains("googlevideo.com") && !lower.contains("/videoplayback")) return null to null
+        val query = url.substringAfter('?', "").substringBefore('#')
+        if (query.isBlank()) return null to null
+        var idVal: String? = null
+        var itagVal: String? = null
+        for (part in query.split('&')) {
+            val k = part.substringBefore('=').lowercase(Locale.ROOT)
+            val v = part.substringAfter('=', "")
+            if (k == "id" && v.isNotBlank()) idVal = v
+            else if (k == "itag" && v.isNotBlank()) itagVal = v
+        }
+        return idVal to itagVal
+    }
+
+    internal fun extractTwitterVideoKey(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val lower = url.lowercase(Locale.ROOT)
+        if (!lower.contains("video.twimg.com/")) return null
+        val match = Regex("""video\.twimg\.com/(ext_tw_video|amplify_video|tweet_video)/([a-zA-Z0-9_-]+)""").find(lower)
+            ?: return null
+        val type = match.groupValues[1]
+        val rawId = match.groupValues[2].substringBefore('.')
+        return if (rawId.isNotBlank()) "twimg_video:$type:$rawId" else null
+    }
+
+    internal fun extractTwitterThumbVideoKey(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val lower = url.lowercase(Locale.ROOT)
+        if (!lower.contains("twimg.com/")) return null
+        val match = Regex("""twimg\.com/(ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)/([a-zA-Z0-9_-]+)""").find(lower)
+            ?: return null
+        val type = match.groupValues[1].removeSuffix("_thumb")
+        val rawId = match.groupValues[2].substringBefore('.')
+        return if (rawId.isNotBlank()) "twimg_video:$type:$rawId" else null
+    }
+
+    /**
+     * Returns a semantic stream/manifest matching key for videos so `.m3u8`/`.mpd` and `.mp4`/`.webm`
+     * with the same specific filename stem (or same parent ID folder + stem) on the same host collapse.
+     */
+    fun videoStemKey(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        return runCatching {
+            val cleanNoQuery = url.substringBefore('?').substringBefore('#')
+            val lower = cleanNoQuery.lowercase(Locale.ROOT)
+                .replace(Regex("""/(?:\d{3,4}p|4k|hd|sd|low|high|med|avc1|hevc|vp9)/"""), "/")
+            val uri = URI(if (lower.startsWith("//")) "https:$lower" else lower)
+            val host = uri.host?.lowercase(Locale.ROOT)?.removePrefix("www.") ?: return@runCatching null
+            val path = uri.path?.lowercase(Locale.ROOT)?.trimEnd('/') ?: return@runCatching null
+            val fileName = path.substringAfterLast('/')
+            val ext = fileName.substringAfterLast('.', "")
+            if (ext !in setOf("mp4", "webm", "mov", "mkv", "m4v", "m3u8", "mpd")) return@runCatching null
+            val rawStem = fileName.substringBeforeLast('.')
+            val cleanStem = rawStem.replace(
+                Regex("""(?:[._-](?:144|240|360|480|540|720|1080|1440|2160)p|_(?:4k|hd|sd|hq|lq|high|med|medium|low|orig|original|source|720|1080|480|360))$"""),
+                ""
+            )
+            val parentFolder = path.substringBeforeLast('/', "").substringAfterLast('/')
+            val hasUniqueParentFolder = parentFolder.length >= 8 &&
+                !GENERIC_STEM_NAMES.contains(parentFolder) &&
+                parentFolder.any { it.isDigit() }
+            if (GENERIC_STEM_NAMES.contains(cleanStem)) {
+                return@runCatching if (hasUniqueParentFolder) "vidparent:$host/$parentFolder" else null
+            }
+            if (cleanStem.length < 4) return@runCatching null
+            "vidstem:$host/${if (parentFolder.isNotBlank()) "$parentFolder/" else ""}$cleanStem"
+        }.getOrNull()
+    }
+
+    /**
+     * Produces a conservative cross-CDN key from a high-entropy / specific filename stem so identical
+     * media files mirrored across CDNs or paths deduplicate without over-merging generic names.
+     */
+    fun specificMediaStemKey(url: String?, isVideo: Boolean, isAudio: Boolean): String? {
+        if (url.isNullOrBlank()) return null
+        if (url.startsWith("data:", ignoreCase = true)) return null
+        return runCatching {
+            val lower = url.lowercase(Locale.ROOT)
+            val uri = URI(if (lower.startsWith("//")) "https:$lower" else lower)
+            val query = uri.rawQuery.orEmpty()
+            // Never fold URLs that differentiate items via explicit ID query parameters.
+            val identifyingKeys = setOf(
+                "id", "v", "vid", "video_id", "file", "filename", "name", "item",
+                "uuid", "guid", "asset", "photo_id", "docid", "user", "uid", "post_id", "page"
+            )
+            if (query.isNotBlank()) {
+                val hasDistinctQueryId = query.split('&').any { p ->
+                    val k = p.substringBefore('=')
+                    identifyingKeys.contains(k) && p.substringAfter('=', "").isNotBlank()
+                }
+                if (hasDistinctQueryId) return@runCatching null
+            }
+
+            val path = uri.path.orEmpty()
+            val fileName = path.substringAfterLast('/')
+            if (!fileName.contains('.')) return@runCatching null
+            val ext = fileName.substringAfterLast('.', "")
+            val rawStem = fileName.substringBeforeLast('.')
+            var stem = rawStem
+                .replace(Regex("""-(?:\d{2,5}x\d{2,5}|scaled|thumb|medium|large|small)$"""), "")
+                .replace(Regex("""_(?:\d{2,5}x\d{2,5}|\d{2,5}x|x\d{2,5}|pico|icon|thumb|small|compact|medium|large|grande|original|master|1024x1024|2048x2048)$"""), "")
+                .replace(Regex("""@(?:\d+x|\d+\.\d+x)$"""), "")
+                .replace(Regex("""(?:[._-](?:144|240|360|480|540|720|1080|1440|2160)p|_(?:4k|hd|sd|hq|lq|high|med|medium|low|orig|original|source))$"""), "")
+            // Imgur 7-char IDs often include an extra trailing thumbnail letter (e.g. abc1234l -> abc1234).
+            if (stem in GENERIC_STEM_NAMES) return@runCatching null
+
+            // Must be genuinely specific (>= 12 chars and either contains both letters & digits,
+            // or >= 18 chars with separators/mixed slug tokens).
+            val hasLetter = stem.any { it in 'a'..'z' }
+            val hasDigit = stem.any { it in '0'..'9' }
+            val hasSlugToken = stem.length >= 18 && (stem.contains('_') || stem.contains('-'))
+            if (stem.length < 12 || (!(hasLetter && hasDigit) && !hasSlugToken)) {
+                return@runCatching null
+            }
+
+            val kindBucket = when {
+                isVideo -> "VID"
+                isAudio -> "AUD"
+                ext == "gif" -> "GIF"
+                else -> "IMG"
+            }
+            "stem:$kindBucket:$stem"
+        }.getOrNull()
+    }
+
+    /**
+     * Computes SHA-256 hex digest of an existing non-empty local file (cached by path/length/mtime).
+     */
+    fun computeFileSha256(file: File?): String? {
+        if (file == null) return null
+        return runCatching {
+            if (!file.exists() || !file.isFile) return null
+            val len = file.length()
+            if (len <= 0L) return null
+            val cacheKey = "${file.absolutePath}:$len:${file.lastModified()}"
+            fileSha256Cache[cacheKey]?.let { return it }
+
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(16 * 1024)
+            file.inputStream().use { input ->
+                var read = input.read(buffer)
+                while (read != -1) {
+                    digest.update(buffer, 0, read)
+                    read = input.read(buffer)
+                }
+            }
+            val hex = digest.digest().joinToString("") { "%02x".format(it) }
+            if (fileSha256Cache.size > 512) {
+                fileSha256Cache.clear()
+            }
+            fileSha256Cache[cacheKey] = hex
+            hex
+        }.getOrNull()
+    }
+
+    internal fun extractVideoPlatformIdentity(item: ScrapedMediaItem): Set<String> {
+        if (!item.isVideo && !item.isStream) return emptySet()
+        val ids = LinkedHashSet<String>()
+        extractTwitterVideoKey(item.url)?.let { ids.add(it) }
+        val (gvId, _) = extractGoogleVideoIdAndItag(item.url)
+        if (!gvId.isNullOrBlank()) ids.add("gv:$gvId")
+        val ytSpecific = youtubeSpecificItemId(item)
+        if (!ytSpecific.isNullOrBlank() && (gvId != null || item.url.contains("youtube", ignoreCase = true) || item.url.contains("ytimg", ignoreCase = true))) {
+            ids.add("ytvid:${ytSpecific.lowercase(Locale.ROOT)}")
+        }
+        val dKey = deduplicationKey(item.url)
+        if (dKey.startsWith("vreddit:")) ids.add(dKey)
+        return ids
+    }
+
+    internal fun areScrapedItemsSemanticDuplicates(a: ScrapedMediaItem, b: ScrapedMediaItem): Boolean {
+        if (deduplicationKey(a.url) == deduplicationKey(b.url)) return true
+
+        // Cross-itag YouTube / Reddit / Twitter video variants
+        if ((a.isVideo || a.isStream) && (b.isVideo || b.isStream)) {
+            val pA = extractVideoPlatformIdentity(a)
+            val pB = extractVideoPlatformIdentity(b)
+            if (pA.isNotEmpty() && pB.isNotEmpty() && pA.any { it in pB }) return true
+
+            val vStemA = videoStemKey(a.url)
+            val vStemB = videoStemKey(b.url)
+            if (vStemA != null && vStemA == vStemB) return true
+        }
+
+        // Cross-CDN high-entropy filename stem with matching category
+        val stemA = specificMediaStemKey(a.url, a.isVideo || a.isStream, a.isAudio)
+        val stemB = specificMediaStemKey(b.url, b.isVideo || b.isStream, b.isAudio)
+        if (stemA != null && stemA == stemB) return true
+
+        // Exact non-trivial file size + compatible media type + compatible clean filename
+        val sA = a.sizeBytes ?: 0L
+        val sB = b.sizeBytes ?: 0L
+        if (sA > 16_384L && sA == sB && (a.isVideo || a.isStream) == (b.isVideo || b.isStream) && a.isAudio == b.isAudio) {
+            val fileA = a.url.substringBefore('?').substringAfterLast('/').substringBeforeLast('.').lowercase(Locale.ROOT)
+            val fileB = b.url.substringBefore('?').substringAfterLast('/').substringBeforeLast('.').lowercase(Locale.ROOT)
+            if (fileA.length >= 4 && fileA !in GENERIC_STEM_NAMES && fileA == fileB) return true
+        }
+
+        return false
     }
 
     private fun mediaUri(url: String): URI? = runCatching { URI(url) }.getOrNull()
@@ -1179,7 +1515,10 @@ object MediaClassifier {
             val audioPath = audioUri.path.orEmpty()
             val videoPath = videoUri.path.orEmpty()
             val audioFile = audioPath.substringAfterLast('/')
-            val isDashAudio = audioFile.startsWith("DASH_AUDIO", ignoreCase = true) || audioFile.startsWith("DASH-AUDIO", ignoreCase = true)
+            val isDashAudio = audioFile.startsWith("DASH_AUDIO", ignoreCase = true) ||
+                audioFile.startsWith("DASH-AUDIO", ignoreCase = true) ||
+                audioFile.startsWith("CMAF_AUDIO", ignoreCase = true) ||
+                audioFile.startsWith("CMAF-AUDIO", ignoreCase = true)
             if (isDashAudio && audioPath.substringBeforeLast('/') == videoPath.substringBeforeLast('/') && audioPath != videoPath) return true
         }
         return false
@@ -1187,8 +1526,8 @@ object MediaClassifier {
 
     /**
      * Merges incoming media items into a target map keyed by deduplicationKey.
-     * Unified pipeline for deduplication, video-poster folding, quality upgrades,
-     * resolution hint selection, provenance merging, and header retention.
+     * Unified pipeline for deduplication, semantic cross-variant collapsing, video-poster folding,
+     * quality upgrades, resolution hint selection, provenance merging, and header retention.
      * Returns true if any item was added, replaced, or upgraded.
      */
     fun mergeMediaItems(
@@ -1198,11 +1537,44 @@ object MediaClassifier {
         if (incoming.isEmpty()) return false
         var modified = false
 
+        fun mergePair(existing: ScrapedMediaItem, item: ScrapedMediaItem, canonicalResolvedUrl: Boolean): ScrapedMediaItem {
+            val cmp = compareMediaQuality(item, existing)
+            val preferred = if (cmp > 0) item else existing
+            val secondary = if (preferred === item) existing else item
+
+            val engines = listOf(existing.provenance.extractorEngine, item.provenance.extractorEngine)
+                .filter { it.isNotBlank() }
+                .distinct()
+            val mergedEngine = engines.joinToString(" + ").ifBlank { preferred.provenance.extractorEngine }
+            val mergedThumb = preferred.thumbnailUrl ?: secondary.thumbnailUrl
+            val mergedResolution = when {
+                parsePixelArea(preferred) != null -> preferred.resolutionHint ?: secondary.resolutionHint
+                parsePixelArea(secondary) != null -> secondary.resolutionHint ?: preferred.resolutionHint
+                !preferred.resolutionHint.isNullOrBlank() && preferred.resolutionHint != "Network" -> preferred.resolutionHint
+                !secondary.resolutionHint.isNullOrBlank() && secondary.resolutionHint != "Network" -> secondary.resolutionHint
+                else -> preferred.resolutionHint ?: secondary.resolutionHint
+            }
+            val mergedHeaders = secondary.downloadHeaders + preferred.downloadHeaders
+            val finalUrl = if (canonicalResolvedUrl) resolveOriginalMedia(preferred.url).mediaUrl else preferred.url
+            val mergedSize = maxOf(preferred.sizeBytes ?: 0L, secondary.sizeBytes ?: 0L).takeIf { it > 0L }
+
+            return preferred.copy(
+                id = existing.id,
+                url = finalUrl,
+                thumbnailUrl = mergedThumb,
+                resolutionHint = mergedResolution,
+                sizeBytes = if (preferred === item && item.sizeBytes != null) item.sizeBytes else mergedSize,
+                provenance = preferred.provenance.copy(extractorEngine = mergedEngine),
+                downloadHeaders = mergedHeaders
+            )
+        }
+
         fun getVideoThumbKeys(): Set<String> {
             val keys = mutableSetOf<String>()
             for (entry in targetMap.values) {
                 if (entry.isVideo) {
                     entry.thumbnailUrl?.let { keys.add(deduplicationKey(it)) }
+                    extractTwitterVideoKey(entry.url)?.let { keys.add(it) }
                     val ytId = extractYouTubeVideoId(entry.url)
                         ?: entry.thumbnailUrl?.let { extractYouTubeVideoId(it) }
                         ?: extractYouTubeVideoId(entry.provenance.pageUrl)
@@ -1236,36 +1608,47 @@ object MediaClassifier {
                     ?: extractYouTubeVideoId(item.provenance.pageUrl)
                     ?: item.metadata["source_url"]?.let { extractYouTubeVideoId(it) }
                     ?: item.metadata["webpage_url"]?.let { extractYouTubeVideoId(it) }
+                val twVidKey = extractTwitterVideoKey(item.url)
                 val videoPosterKeys = mutableSetOf<String>()
                 item.thumbnailUrl?.let { videoPosterKeys.add(deduplicationKey(it)) }
                 if (ytId != null) videoPosterKeys.add("ytthumb:${ytId.lowercase(Locale.ROOT)}")
 
                 var bestThumb = item.thumbnailUrl
-                for (pKey in videoPosterKeys) {
-                    val existingImg = targetMap[pKey]
-                    if (existingImg != null && !existingImg.isVideo) {
-                        if (bestThumb == null || compareMediaQuality(existingImg, item.copy(url = bestThumb)) > 0) {
-                            bestThumb = existingImg.thumbnailUrl ?: existingImg.url
+                for ((eKey, existingImg) in targetMap.entries.toList()) {
+                    if (!existingImg.isVideo && !existingImg.isStream) {
+                        val isPosterMatch = eKey in videoPosterKeys ||
+                            (twVidKey != null && extractTwitterThumbVideoKey(existingImg.url) == twVidKey)
+                        if (isPosterMatch) {
+                            if (bestThumb == null || compareMediaQuality(existingImg, item.copy(url = bestThumb)) > 0) {
+                                bestThumb = existingImg.thumbnailUrl ?: existingImg.url
+                            }
+                            targetMap.remove(eKey)
+                            modified = true
                         }
-                        targetMap.remove(pKey)
-                        modified = true
                     }
                 }
                 val candidateVideo = if (bestThumb != item.thumbnailUrl) item.copy(thumbnailUrl = bestThumb) else item
-                val existing = targetMap[key]
-                if (existing == null) {
+                val directExisting = targetMap[key]
+                val matchedEntry = if (directExisting != null) {
+                    key to directExisting
+                } else {
+                    targetMap.entries.firstOrNull { (_, existing) ->
+                        areScrapedItemsSemanticDuplicates(candidateVideo, existing)
+                    }?.toPair()
+                }
+                if (matchedEntry == null) {
                     targetMap[key] = candidateVideo
                     modified = true
                 } else {
-                    val cmp = compareMediaQuality(candidateVideo, existing)
-                    val preferred = if (cmp > 0) candidateVideo else existing
-                    val secondary = if (preferred === candidateVideo) existing else candidateVideo
-                    val upgraded = preferred.copy(
-                        id = existing.id,
-                        thumbnailUrl = preferred.thumbnailUrl ?: secondary.thumbnailUrl
-                    )
-                    if (upgraded != existing) {
-                        targetMap[key] = upgraded
+                    val (existingKey, existing) = matchedEntry
+                    val upgraded = mergePair(existing, candidateVideo, canonicalResolvedUrl = false)
+                    val targetKey = deduplicationKey(upgraded.url)
+                    if (existingKey != targetKey && !targetMap.containsKey(targetKey)) {
+                        targetMap.remove(existingKey)
+                        targetMap[targetKey] = upgraded
+                        modified = true
+                    } else if (upgraded != existing) {
+                        targetMap[existingKey] = upgraded
                         modified = true
                     }
                 }
@@ -1274,7 +1657,8 @@ object MediaClassifier {
 
             // Case B: Incoming item is an Image -> check if it matches an existing video's thumbnail/poster
             val currentVideoThumbKeys = getVideoThumbKeys()
-            if (key in currentVideoThumbKeys) {
+            val twThumbKey = extractTwitterThumbVideoKey(item.url)
+            if (key in currentVideoThumbKeys || (twThumbKey != null && twThumbKey in currentVideoThumbKeys)) {
                 for ((vKey, vItem) in targetMap.entries.toList()) {
                     if (vItem.isVideo) {
                         val ytId = extractYouTubeVideoId(vItem.url)
@@ -1283,7 +1667,8 @@ object MediaClassifier {
                             ?: vItem.metadata["source_url"]?.let { extractYouTubeVideoId(it) }
                             ?: vItem.metadata["webpage_url"]?.let { extractYouTubeVideoId(it) }
                         val matches = (vItem.thumbnailUrl != null && deduplicationKey(vItem.thumbnailUrl) == key) ||
-                                (ytId != null && "ytthumb:${ytId.lowercase(Locale.ROOT)}" == key)
+                            (ytId != null && "ytthumb:${ytId.lowercase(Locale.ROOT)}" == key) ||
+                            (twThumbKey != null && extractTwitterVideoKey(vItem.url) == twThumbKey)
                         if (matches) {
                             if (vItem.thumbnailUrl == null || compareMediaQuality(item, vItem.copy(url = vItem.thumbnailUrl)) > 0) {
                                 targetMap[vKey] = vItem.copy(thumbnailUrl = item.thumbnailUrl ?: item.url)
@@ -1295,39 +1680,28 @@ object MediaClassifier {
                 continue
             }
 
-            // Case C: Standard media insertion / quality upgrade
-            val existing = targetMap[key]
-            if (existing == null) {
+            // Case C: Standard media insertion / quality upgrade (with semantic match lookup)
+            val directExisting = targetMap[key]
+            val matchedEntry = if (directExisting != null) {
+                key to directExisting
+            } else {
+                targetMap.entries.firstOrNull { (_, existing) ->
+                    areScrapedItemsSemanticDuplicates(item, existing)
+                }?.toPair()
+            }
+            if (matchedEntry == null) {
                 targetMap[key] = item
                 modified = true
             } else {
-                val cmp = compareMediaQuality(item, existing)
-                val preferred = if (cmp > 0) item else existing
-                val secondary = if (preferred === item) existing else item
-
-                val engines = listOf(existing.provenance.extractorEngine, item.provenance.extractorEngine).distinct()
-                val mergedEngine = engines.joinToString(" + ")
-                val mergedThumb = preferred.thumbnailUrl ?: secondary.thumbnailUrl
-                val mergedResolution = when {
-                    parsePixelArea(preferred) != null -> preferred.resolutionHint ?: secondary.resolutionHint
-                    parsePixelArea(secondary) != null -> secondary.resolutionHint ?: preferred.resolutionHint
-                    !preferred.resolutionHint.isNullOrBlank() && preferred.resolutionHint != "Network" -> preferred.resolutionHint
-                    !secondary.resolutionHint.isNullOrBlank() && secondary.resolutionHint != "Network" -> secondary.resolutionHint
-                    else -> preferred.resolutionHint ?: secondary.resolutionHint
-                }
-                val mergedHeaders = secondary.downloadHeaders + preferred.downloadHeaders
-                val resolvedUrl = resolveOriginalMedia(preferred.url).mediaUrl
-
-                val upgraded = preferred.copy(
-                    id = existing.id,
-                    url = resolvedUrl,
-                    thumbnailUrl = mergedThumb,
-                    resolutionHint = mergedResolution,
-                    provenance = preferred.provenance.copy(extractorEngine = mergedEngine),
-                    downloadHeaders = mergedHeaders
-                )
-                if (upgraded != existing) {
-                    targetMap[key] = upgraded
+                val (existingKey, existing) = matchedEntry
+                val upgraded = mergePair(existing, item, canonicalResolvedUrl = true)
+                val targetKey = deduplicationKey(upgraded.url)
+                if (existingKey != targetKey && !targetMap.containsKey(targetKey)) {
+                    targetMap.remove(existingKey)
+                    targetMap[targetKey] = upgraded
+                    modified = true
+                } else if (upgraded != existing) {
+                    targetMap[existingKey] = upgraded
                     modified = true
                 }
             }
@@ -1378,16 +1752,25 @@ object MediaClassifier {
         val parsedUri = mediaUri(url)
         val host = parsedUri?.host?.lowercase(Locale.ROOT).orEmpty()
         val pathFileName = parsedUri?.path.orEmpty().substringAfterLast('/')
-        if (host == "v.redd.it" && (pathFileName.startsWith("DASH_AUDIO", ignoreCase = true) || pathFileName.startsWith("DASH-AUDIO", ignoreCase = true))) {
+        if (host == "v.redd.it" && (
+                pathFileName.startsWith("DASH_AUDIO", ignoreCase = true) ||
+                    pathFileName.startsWith("DASH-AUDIO", ignoreCase = true) ||
+                    pathFileName.startsWith("CMAF_AUDIO", ignoreCase = true) ||
+                    pathFileName.startsWith("CMAF-AUDIO", ignoreCase = true)
+                )
+        ) {
             return ClassificationResult(category = MediaCategory.AUDIO, format = "M4A", mimeType = "audio/mp4", isVideo = false, isAudio = true, isStream = false)
         }
 
-        // YouTube's separate audio representations use /videoplayback with a MIME query parameter.
+        // YouTube's separate audio representations use /videoplayback with a MIME query parameter or audio-only itag.
         val rawQuery = parsedUri?.rawQuery.orEmpty().lowercase(Locale.ROOT)
-        val isGoogleVideoAudio = host.endsWith("googlevideo.com") &&
-            Regex("""(?:^|&)mime=audio(?:%2f|/)""").containsMatchIn(rawQuery)
+        val (_, gvItag) = extractGoogleVideoIdAndItag(url)
+        val isAudioItag = gvItag != null && gvItag in YOUTUBE_AUDIO_ONLY_ITAGS
+        val isGoogleVideoAudio = (host.endsWith("googlevideo.com") || lower.contains("/videoplayback")) &&
+            (Regex("""(?:^|&)mime=audio(?:%2f|/)""").containsMatchIn(rawQuery) || isAudioItag)
         if (isGoogleVideoAudio) {
-            val isWebmAudio = rawQuery.contains("audio%2fwebm") || rawQuery.contains("audio/webm")
+            val isWebmAudio = rawQuery.contains("audio%2fwebm") || rawQuery.contains("audio/webm") ||
+                gvItag in setOf("171", "172", "249", "250", "251", "600")
             return ClassificationResult(
                 category = MediaCategory.AUDIO,
                 format = if (isWebmAudio) "WEBM" else "M4A",
@@ -1427,12 +1810,14 @@ object MediaClassifier {
 
         // 2. Video formats
         if (lower.contains("/videoplayback") || lower.contains("googlevideo.com")) {
-            val isAudioStream = lower.contains("mime=audio") || mimeLower.contains("audio/")
+            val isAudioStream = lower.contains("mime=audio") || mimeLower.contains("audio/") || isAudioItag
             return if (isAudioStream) {
+                val isWebmAudio = lower.contains("audio%2fwebm") || lower.contains("audio/webm") ||
+                    gvItag in setOf("171", "172", "249", "250", "251", "600")
                 ClassificationResult(
                     category = MediaCategory.AUDIO,
-                    format = "M4A",
-                    mimeType = "audio/mp4",
+                    format = if (isWebmAudio) "WEBM" else "M4A",
+                    mimeType = if (isWebmAudio) "audio/webm" else "audio/mp4",
                     isVideo = false,
                     isAudio = true,
                     isStream = false

@@ -19,7 +19,8 @@ data class MediaInboxItem(
     val isStream: Boolean = false,
     val format: String = "",
     val sizeBytes: Long = 0L,
-    val dateAddedMillis: Long = System.currentTimeMillis()
+    val dateAddedMillis: Long = System.currentTimeMillis(),
+    val thumbnailUrl: String = ""
 )
 
 data class MediaInboxStack(
@@ -79,7 +80,8 @@ class MediaInboxRepository(private val context: Context) {
                             isStream = itmObj.optBoolean("isStream", false),
                             format = itmObj.optString("format", ""),
                             sizeBytes = itmObj.optLong("sizeBytes", 0L),
-                            dateAddedMillis = itmObj.optLong("dateAddedMillis", timestamp)
+                            dateAddedMillis = itmObj.optLong("dateAddedMillis", timestamp),
+                            thumbnailUrl = itmObj.optString("thumbnailUrl", "")
                         )
                     )
                 }
@@ -161,6 +163,9 @@ class MediaInboxRepository(private val context: Context) {
                             put("format", itm.format)
                             put("sizeBytes", itm.sizeBytes)
                             put("dateAddedMillis", itm.dateAddedMillis)
+                            if (itm.thumbnailUrl.isNotBlank()) {
+                                put("thumbnailUrl", itm.thumbnailUrl)
+                            }
                         }
                         itemsArr.put(itmObj)
                     }
@@ -224,9 +229,13 @@ class MediaInboxRepository(private val context: Context) {
 
         if (existingIndex >= 0) {
             val existing = current[existingIndex]
-            // When replacing an item with the same sourceUrl or id, delete old file on disk if path changed
-            val replacedItems = existing.items.filter {
-                (it.id == item.id || (it.sourceUrl.isNotBlank() && it.sourceUrl == item.sourceUrl)) && it.localUri != item.localUri
+            val incomingCanon = item.sourceUrl.takeIf { it.isNotBlank() }?.let { MediaClassifier.deduplicationKey(it) }
+            // When replacing an item with the same sourceUrl, canonical key, or id, delete old file on disk if path changed
+            val replacedItems = existing.items.filter { existingItem ->
+                val existingCanon = existingItem.sourceUrl.takeIf { it.isNotBlank() }?.let { MediaClassifier.deduplicationKey(it) }
+                val sameUrlOrKey = (existingItem.sourceUrl.isNotBlank() && existingItem.sourceUrl == item.sourceUrl) ||
+                    (incomingCanon != null && existingCanon != null && incomingCanon == existingCanon)
+                (existingItem.id == item.id || sameUrlOrKey) && existingItem.localUri != item.localUri
             }
             for (oldItem in replacedItems) {
                 runCatching {
@@ -238,9 +247,17 @@ class MediaInboxRepository(private val context: Context) {
                 }
             }
 
-            val updatedItems = existing.items.filter {
-                it.id != item.id && (it.sourceUrl.isBlank() || it.sourceUrl != item.sourceUrl) && it.localUri != item.localUri
-            } + item
+            val updatedItems = MediaNormalizer.deduplicateMediaInboxItems(
+                existing.items.filter { existingItem ->
+                    val existingCanon = existingItem.sourceUrl.takeIf { it.isNotBlank() }?.let { MediaClassifier.deduplicationKey(it) }
+                    val sameCanon = incomingCanon != null && existingCanon != null && incomingCanon == existingCanon
+                    existingItem.id != item.id &&
+                        (existingItem.sourceUrl.isBlank() || existingItem.sourceUrl != item.sourceUrl) &&
+                        !sameCanon &&
+                        existingItem.localUri != item.localUri
+                } + item,
+                existing.sourceUrl
+            )
             current[existingIndex] = existing.copy(
                 items = updatedItems,
                 timestampMillis = System.currentTimeMillis()

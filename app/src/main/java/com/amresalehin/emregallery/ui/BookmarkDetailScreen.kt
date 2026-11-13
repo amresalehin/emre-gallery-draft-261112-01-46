@@ -303,10 +303,15 @@ fun PocketBookmarkViewerPage(
             val nextIdx = (safeIndex + 1) % total
             val itm = effectiveMediaList.getOrNull(nextIdx)
             if (itm != null) {
-                val path = if (itm.localUri.isNotBlank()) {
-                    val f = File(itm.localUri.removePrefix("file://"))
-                    if (f.exists()) f.absolutePath else itm.sourceUrl
-                } else itm.sourceUrl
+                val localFile = if (itm.localUri.isNotBlank()) {
+                    File(itm.localUri.removePrefix("file://")).takeIf { it.exists() && it.length() > 0L }
+                } else null
+                val path = when {
+                    itm.thumbnailUrl.isNotBlank() && (itm.isVideo || itm.isStream || localFile == null) -> itm.thumbnailUrl
+                    localFile != null -> localFile.absolutePath
+                    itm.thumbnailUrl.isNotBlank() -> itm.thumbnailUrl
+                    else -> itm.sourceUrl
+                }
                 if (path.isNotBlank()) {
                     val request = ImageRequest.Builder(context)
                         .data(path)
@@ -356,10 +361,16 @@ fun PocketBookmarkViewerPage(
             // Ambient blurred backdrop of the current media item filling the media detail screen
             val currentItemForBlur = effectiveMediaList.getOrNull(safeIndex)
             val blurMediaPath = remember(currentItemForBlur) {
-                if (currentItemForBlur?.localUri?.isNotBlank() == true) {
-                    val f = File(currentItemForBlur.localUri.removePrefix("file://"))
-                    if (f.exists()) f.absolutePath else currentItemForBlur.sourceUrl
-                } else currentItemForBlur?.sourceUrl ?: ""
+                val localFile = if (currentItemForBlur?.localUri?.isNotBlank() == true) {
+                    File(currentItemForBlur.localUri.removePrefix("file://")).takeIf { it.exists() && it.length() > 0L }
+                } else null
+                when {
+                    currentItemForBlur == null -> ""
+                    currentItemForBlur.thumbnailUrl.isNotBlank() && (currentItemForBlur.isVideo || currentItemForBlur.isStream || localFile == null) -> currentItemForBlur.thumbnailUrl
+                    localFile != null -> localFile.absolutePath
+                    currentItemForBlur.thumbnailUrl.isNotBlank() -> currentItemForBlur.thumbnailUrl
+                    else -> currentItemForBlur.sourceUrl
+                }
             }
 
             if (blurMediaPath.isNotBlank()) {
@@ -1186,11 +1197,16 @@ fun PocketBookmarkViewerPage(
                                         ) {
                                             itemsIndexed(effectiveMediaList) { index, item ->
                                                 val isSelected = (index == safeIndex)
-                                                val mediaPath = remember(item) {
-                                                    if (item.localUri.isNotBlank()) {
-                                                        val f = File(item.localUri.removePrefix("file://"))
-                                                        if (f.exists()) f else item.sourceUrl
-                                                    } else item.sourceUrl
+                                                val mediaPath: Any = remember(item, stack.previewImageUrl) {
+                                                    val localFile = if (item.localUri.isNotBlank()) {
+                                                        File(item.localUri.removePrefix("file://")).takeIf { it.exists() && it.length() > 0L }
+                                                    } else null
+                                                    when {
+                                                        item.thumbnailUrl.isNotBlank() && (item.isVideo || item.isStream || localFile == null) -> item.thumbnailUrl
+                                                        localFile != null -> localFile
+                                                        item.thumbnailUrl.isNotBlank() -> item.thumbnailUrl
+                                                        else -> item.sourceUrl
+                                                    }
                                                 }
 
                                                 Surface(
@@ -1393,6 +1409,11 @@ private fun BookmarkDeckCardContent(
             if (f.exists()) f.absolutePath else item.sourceUrl
         } else item?.sourceUrl ?: ""
     }
+    val previewThumbPath = remember(item, currentMediaPath) {
+        if (item != null && item.thumbnailUrl.isNotBlank() && (item.isVideo || item.isStream || !currentMediaPath.startsWith("/"))) {
+            item.thumbnailUrl
+        } else currentMediaPath
+    }
 
     if (item != null && currentMediaPath.isNotBlank()) {
         val isCurrentVideo = remember(item, currentMediaPath) {
@@ -1412,7 +1433,7 @@ private fun BookmarkDeckCardContent(
             // Soft blurred ambient backdrop inside the deck card container
             AsyncImage(
                 model = ImageRequest.Builder(context)
-                    .data(currentMediaPath)
+                    .data(previewThumbPath)
                     .crossfade(true)
                     .build(),
                 contentDescription = null,
@@ -1455,7 +1476,7 @@ private fun BookmarkDeckCardContent(
                 ) {
                     AsyncImage(
                         model = ImageRequest.Builder(context)
-                            .data(currentMediaPath)
+                            .data(previewThumbPath)
                             .crossfade(true)
                             .build(),
                         contentDescription = item.title.ifBlank { "Media" },

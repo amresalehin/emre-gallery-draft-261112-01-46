@@ -249,12 +249,17 @@ class MediaDownloadWorker(
                     val pocketRepo = PocketRepository.getInstance(applicationContext)
                     val stack = pocketRepo.bookmarks.value.firstOrNull { it.id == stackId }
                     if (stack != null) {
+                        val downloadedKey = MediaClassifier.deduplicationKey(mediaUrl)
                         val updatedItems = stack.items.map { itm ->
-                            if (itm.id == itemId || (itm.sourceUrl.isNotBlank() && itm.sourceUrl == mediaUrl)) {
+                            val itemMatches = itm.id == itemId || (itm.sourceUrl.isNotBlank() && (
+                                itm.sourceUrl == mediaUrl ||
+                                    MediaClassifier.deduplicationKey(itm.sourceUrl) == downloadedKey
+                                ))
+                            if (itemMatches) {
                                 itm.copy(localUri = fileUri, sizeBytes = downloadedFile.length())
                             } else itm
                         }
-                        val updatedPreview = if (stack.previewImageUrl == mediaUrl || stack.previewImageUrl.isBlank()) {
+                        val updatedPreview = if (stack.previewImageUrl.isBlank() || (!isVideo && !isStream && stack.previewImageUrl == mediaUrl)) {
                             fileUri
                         } else stack.previewImageUrl
                         pocketRepo.updateBookmark(stack.copy(items = updatedItems, previewImageUrl = updatedPreview))

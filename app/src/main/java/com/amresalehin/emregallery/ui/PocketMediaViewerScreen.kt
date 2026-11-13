@@ -671,28 +671,43 @@ private fun executeSaveMedia(
         val localFile = if (localFilePath.isNotBlank()) File(localFilePath) else null
 
         if (localFile != null && localFile.exists() && localFile.length() > 0L) {
-            val destFile = File(targetDir, fileName)
-            val copied = withContext(Dispatchers.IO) {
+            val existingOrCopiedFile: File? = withContext(Dispatchers.IO) {
                 runCatching {
-                    localFile.copyTo(destFile, overwrite = true)
+                    val destFile = File(targetDir, fileName)
+                    val sameCanonicalPath = localFile.canonicalFile == destFile.canonicalFile
+                    if (sameCanonicalPath) {
+                        return@runCatching localFile
+                    }
+                    val sourceHash = com.amresalehin.emregallery.data.MediaClassifier.computeFileSha256(localFile)
+                    val matchingExisting = if (sourceHash != null) {
+                        targetDir.listFiles()?.firstOrNull { candidate ->
+                            candidate.isFile &&
+                                candidate.length() == localFile.length() &&
+                                com.amresalehin.emregallery.data.MediaClassifier.computeFileSha256(candidate) == sourceHash
+                        }
+                    } else null
+
+                    val targetOut = matchingExisting ?: destFile.also {
+                        localFile.copyTo(it, overwrite = true)
+                    }
                     MediaScannerConnection.scanFile(
                         context,
-                        arrayOf(destFile.absolutePath),
+                        arrayOf(targetOut.absolutePath),
                         arrayOf(if (item.isVideo) "video/*" else "image/*"),
                         null
                     )
-                    true
-                }.getOrDefault(false)
+                    targetOut
+                }.getOrNull()
             }
-            if (copied) {
-                val fileUri = Uri.fromFile(destFile).toString()
+            if (existingOrCopiedFile != null) {
+                val fileUri = Uri.fromFile(existingOrCopiedFile).toString()
                 DownloadActivityManager.markFinished(
                     itemId = itemId,
                     localUri = fileUri,
-                    sizeBytes = destFile.length()
+                    sizeBytes = existingOrCopiedFile.length()
                 )
-                updatePocketBookmarkMedia(context, stack, item, fileUri, destFile.length())
-                Toast.makeText(context, "Saved to device: ${destFile.name}", Toast.LENGTH_LONG).show()
+                updatePocketBookmarkMedia(context, stack, item, fileUri, existingOrCopiedFile.length())
+                Toast.makeText(context, "Saved to device: ${existingOrCopiedFile.name}", Toast.LENGTH_LONG).show()
                 return@launch
             }
         }

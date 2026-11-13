@@ -1000,12 +1000,16 @@ fun PocketBookmarkStaggeredCard(
 
     val firstMedia = stack.items.firstOrNull()
     val mediaModel = remember(firstMedia, stack.previewImageUrl) {
-        firstMedia?.let {
-            if (it.localUri.isNotBlank()) {
-                val f = File(it.localUri.removePrefix("file://"))
-                if (f.exists()) f else it.sourceUrl.ifBlank { it.localUri }
-            } else {
-                it.sourceUrl
+        firstMedia?.let { item ->
+            val localFile = if (item.localUri.isNotBlank()) {
+                File(item.localUri.removePrefix("file://")).takeIf { it.exists() && it.length() > 0L }
+            } else null
+            when {
+                item.thumbnailUrl.isNotBlank() && (item.isVideo || item.isStream || localFile == null) -> item.thumbnailUrl
+                localFile != null -> localFile
+                item.thumbnailUrl.isNotBlank() -> item.thumbnailUrl
+                item.isVideo && stack.previewImageUrl.isNotBlank() -> stack.previewImageUrl
+                else -> item.sourceUrl.ifBlank { item.localUri }
             }
         } ?: stack.previewImageUrl.takeIf { it.isNotBlank() }
     }

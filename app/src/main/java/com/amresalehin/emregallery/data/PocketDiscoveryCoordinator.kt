@@ -244,7 +244,8 @@ object PocketDiscoveryCoordinator {
                     isAudio = item.isAudio,
                     isStream = item.isStream,
                     format = item.format,
-                    sizeBytes = item.sizeBytes ?: 0L
+                    sizeBytes = item.sizeBytes ?: 0L,
+                    thumbnailUrl = item.thumbnailUrl.orEmpty()
                 )
             }
         )

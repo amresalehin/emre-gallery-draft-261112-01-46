@@ -4,13 +4,17 @@ import com.amresalehin.emregallery.data.BrowserTabSession
 import com.amresalehin.emregallery.data.PocketDiscoveryCoordinator
 import com.amresalehin.emregallery.data.MediaCategory
 import com.amresalehin.emregallery.data.MediaClassifier
+import com.amresalehin.emregallery.data.MediaInboxItem
+import com.amresalehin.emregallery.data.MediaNormalizer
 import com.amresalehin.emregallery.data.MediaProvenance
 import com.amresalehin.emregallery.data.ScrapedMediaItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.file.Files
 
 class MediaDeduplicationPureUnitTest {
 
@@ -887,6 +891,211 @@ class MediaDeduplicationPureUnitTest {
         assertTrue(PocketDiscoveryCoordinator.isDirectMediaUrl("https://cdn.example.com/audio.m4a"))
         assertFalse(PocketDiscoveryCoordinator.isDirectMediaUrl("https://example.com/article"))
         assertEquals(30_000L, PocketDiscoveryCoordinator.MAX_DISCOVERY_DURATION_MS)
+    }
+
+    @Test
+    fun signedCdnParamsAndShardHostsDeduplicateWithoutMergingDistinctIds() {
+        val igEdgeA = "https://scontent-iad3-1.cdninstagram.com/v/t51.2885-15/450123456_n.jpg?_nc_ht=scontent-iad3-1.cdninstagram.com&_nc_cat=101&oh=00_AfA&oe=6699AA11&ccb=7-5&ig_cache_key=abc"
+        val igEdgeB = "https://scontent-lhr8-2.cdninstagram.com/v/t51.2885-15/450123456_n.webp?_nc_ht=scontent-lhr8-2.cdninstagram.com&_nc_cat=109&oh=00_ZzZ&oe=7788BB22&ccb=7-5"
+        assertEquals(MediaClassifier.deduplicationKey(igEdgeA), MediaClassifier.deduplicationKey(igEdgeB))
+
+        val tkEdgeA = "https://v16m-webapp.tiktokcdn-us.com/abcdef1234567890/video/tos/clip.mp4?x-expires=170000&x-signature=sigA&lr=tiktok&br=1200"
+        val tkEdgeB = "https://v19.tiktokcdn.com/abcdef1234567890/video/tos/clip_720p.mp4?x-expires=180000&x-signature=sigB&lr=tiktok&br=2400"
+        assertEquals(MediaClassifier.deduplicationKey(tkEdgeA), MediaClassifier.deduplicationKey(tkEdgeB))
+
+        val cfA = "https://cdn.example.com/movies/trailer_88421.mp4?Expires=170000&Signature=AAA&Key-Pair-Id=K123&token=99887766554433221100aabbcc"
+        val cfB = "https://cdn.example.com/movies/trailer_88421.mp4?Expires=190000&Signature=BBB&Key-Pair-Id=K456&token=ffeeddccbbaa00112233445566"
+        assertEquals(MediaClassifier.deduplicationKey(cfA), MediaClassifier.deduplicationKey(cfB))
+
+        // Generic endpoints with distinct id or token MUST NOT collapse
+        assertNotEquals(
+            MediaClassifier.deduplicationKey("https://example.com/view?token=user1"),
+            MediaClassifier.deduplicationKey("https://example.com/view?token=user2")
+        )
+    }
+
+    @Test
+    fun youTubeMultiItagAndAudioItagCollapseAcrossStreams() {
+        // Audio-only itag=140 and itag=251 must be classified as audio even when hinted as video/mp4
+        val dashAudio = MediaClassifier.classify(
+            "https://rr2---sn.googlevideo.com/videoplayback?id=streamXYZ&itag=140",
+            mimeHint = "video/mp4"
+        )
+        assertTrue(dashAudio.isAudio)
+        assertFalse(dashAudio.isVideo)
+
+        val stream360 = ScrapedMediaItem(
+            id = "yt_18",
+            url = "https://rr1---sn.googlevideo.com/videoplayback?id=streamXYZ&itag=18&expire=100",
+            title = "Video 360p",
+            isVideo = true,
+            category = MediaCategory.VIDEOS,
+            resolutionHint = "640x360",
+            sizeBytes = 2_000_000L
+        )
+        val stream720 = ScrapedMediaItem(
+            id = "yt_22",
+            url = "https://rr3---sn.googlevideo.com/videoplayback?id=streamXYZ&itag=22&expire=200",
+            title = "Video 720p",
+            isVideo = true,
+            category = MediaCategory.VIDEOS,
+            resolutionHint = "1280x720",
+            sizeBytes = 8_000_000L
+        )
+        val stream1080 = ScrapedMediaItem(
+            id = "yt_137",
+            url = "https://rr4---sn.googlevideo.com/videoplayback?id=streamXYZ&itag=137&expire=300",
+            title = "Video 1080p",
+            isVideo = true,
+            category = MediaCategory.VIDEOS,
+            resolutionHint = "1920x1080",
+            sizeBytes = 15_000_000L
+        )
+
+        val collapsed = MediaClassifier.deduplicateScrapedItems(listOf(stream360, stream720, stream1080))
+        assertEquals(1, collapsed.size)
+        assertEquals("1920x1080", collapsed.single().resolutionHint)
+    }
+
+    @Test
+    fun redditAndTwitterVideoVariantsAndPosterFoldIntoSingleVideo() {
+        val reddit1080 = ScrapedMediaItem(
+            id = "r_1080",
+            url = "https://v.redd.it/post999/DASH_1080.mp4",
+            title = "Clip",
+            isVideo = true,
+            resolutionHint = "1920x1080"
+        )
+        val redditHls = ScrapedMediaItem(
+            id = "r_hls",
+            url = "https://v.redd.it/post999/HLSPlaylist.m3u8",
+            title = "Clip",
+            isVideo = true,
+            isStream = true,
+            category = MediaCategory.STREAMS
+        )
+        val redditAudio = ScrapedMediaItem(
+            id = "r_audio",
+            url = "https://v.redd.it/post999/DASH_AUDIO_128.mp4",
+            title = "Audio",
+            isAudio = true,
+            category = MediaCategory.AUDIO
+        )
+        val redditDedup = MediaClassifier.deduplicateScrapedItems(listOf(redditHls, redditAudio, reddit1080))
+        assertEquals(1, redditDedup.size)
+        assertTrue(redditDedup.single().isVideo)
+        assertFalse(redditDedup.single().isStream)
+
+        val twMp4Low = ScrapedMediaItem(
+            id = "tw_low",
+            url = "https://video.twimg.com/ext_tw_video/1777888999/pu/vid/avc1/480x852/aaa111.mp4?tag=12",
+            title = "Tweet video",
+            isVideo = true,
+            resolutionHint = "480x852"
+        )
+        val twMp4High = ScrapedMediaItem(
+            id = "tw_high",
+            url = "https://video.twimg.com/ext_tw_video/1777888999/pu/vid/avc1/720x1280/bbb222.mp4?tag=12",
+            title = "Tweet video",
+            isVideo = true,
+            resolutionHint = "720x1280"
+        )
+        val twHls = ScrapedMediaItem(
+            id = "tw_hls",
+            url = "https://video.twimg.com/ext_tw_video/1777888999/pu/pl/ccc333.m3u8?tag=12",
+            title = "Tweet stream",
+            isVideo = true,
+            isStream = true
+        )
+        val twThumb = ScrapedMediaItem(
+            id = "tw_thumb",
+            url = "https://pbs.twimg.com/ext_tw_video_thumb/1777888999/pu/img/thumb999.jpg",
+            title = "Poster",
+            isVideo = false
+        )
+        val twDedup = MediaClassifier.deduplicateScrapedItems(listOf(twThumb, twHls, twMp4Low, twMp4High))
+        assertEquals(1, twDedup.size)
+        assertEquals("720x1280", twDedup.single().resolutionHint)
+        assertEquals(twThumb.url, twDedup.single().thumbnailUrl)
+    }
+
+    @Test
+    fun crossCdnHighEntropyStemAndManifestVsMp4DeduplicateSafely() {
+        val hlsManifest = MediaInboxItem(
+            id = "hls_1",
+            title = "Documentary",
+            localUri = "",
+            sourceUrl = "https://cdn-a.example.org/reels/aurora_borealis_9a8b7c6d5e4f.m3u8",
+            isVideo = true,
+            isStream = true,
+            format = "HLS (m3u8)"
+        )
+        val directMp4 = MediaInboxItem(
+            id = "mp4_1",
+            title = "Documentary",
+            localUri = "",
+            sourceUrl = "https://cdn-b.example.net/backup/aurora_borealis_9a8b7c6d5e4f_1080p.mp4",
+            isVideo = true,
+            isStream = false,
+            format = "MP4"
+        )
+        val poster = MediaInboxItem(
+            id = "img_poster",
+            title = "Poster",
+            localUri = "",
+            sourceUrl = "https://cdn-b.example.net/posters/custom_poster_9911.jpg",
+            isVideo = false
+        )
+        val unrelatedNext = MediaInboxItem(
+            id = "mp4_2",
+            title = "Documentary Part 2",
+            localUri = "",
+            sourceUrl = "https://cdn-b.example.net/backup/aurora_borealis_9a8b7c6d5e4f_part02.mp4",
+            isVideo = true,
+            format = "MP4"
+        )
+
+        val videoWithThumb = directMp4.copy(thumbnailUrl = poster.sourceUrl)
+        val inboxDedup = MediaNormalizer.deduplicateMediaInboxItems(listOf(hlsManifest, poster, videoWithThumb, unrelatedNext))
+        assertEquals(2, inboxDedup.size)
+        assertTrue(inboxDedup.any { !it.isStream && it.sourceUrl.endsWith("_1080p.mp4") && it.thumbnailUrl == poster.sourceUrl })
+        assertTrue(inboxDedup.any { it.id == "mp4_2" })
+    }
+
+    @Test
+    fun localFileSha256DeduplicatesIdenticalDownloadedFilesAcrossUrls() {
+        val tmpDir = Files.createTempDirectory("emre_dedup_hash_test").toFile()
+        try {
+            val fileA = tmpDir.resolve("copy_a.mp4")
+            val fileB = tmpDir.resolve("copy_b.mp4")
+            val payload = ByteArray(4096) { i -> (i * 31).toByte() }
+            fileA.writeBytes(payload)
+            fileB.writeBytes(payload)
+
+            val itemA = MediaInboxItem(
+                id = "local_a",
+                title = "Alpha",
+                localUri = "file://${fileA.absolutePath}",
+                sourceUrl = "https://host-one.example.com/a/video_alpha.mp4",
+                isVideo = true,
+                sizeBytes = payload.size.toLong(),
+                thumbnailUrl = "https://host-one.example.com/a/thumb.jpg"
+            )
+            val itemB = MediaInboxItem(
+                id = "local_b",
+                title = "Beta",
+                localUri = "file://${fileB.absolutePath}",
+                sourceUrl = "https://host-two.example.net/b/completely_different_name.mp4",
+                isVideo = true,
+                sizeBytes = payload.size.toLong()
+            )
+
+            val result = MediaNormalizer.deduplicateMediaInboxItems(listOf(itemA, itemB))
+            assertEquals(1, result.size)
+            assertEquals("https://host-one.example.com/a/thumb.jpg", result.single().thumbnailUrl)
+        } finally {
+            tmpDir.deleteRecursively()
+        }
     }
 
 }

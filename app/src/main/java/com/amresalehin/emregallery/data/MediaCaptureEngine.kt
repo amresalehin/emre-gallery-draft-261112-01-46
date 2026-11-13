@@ -571,19 +571,25 @@ object MediaCaptureEngine {
 
         if (isNonMediaPage) return null
 
+        val reqClassification = MediaClassifier.classify(reqUrl, acceptHeader.takeIf { it.contains('/') })
         val isStream = cleanReqPath.endsWith(".m3u8") || cleanReqPath.endsWith(".mpd") ||
                 cleanReqPath.contains("chunklist") || acceptHeader.contains("mpegurl") ||
                 acceptHeader.contains("dash+xml")
 
-        val isVideo = isStream || cleanReqPath.endsWith(".mp4") || cleanReqPath.endsWith(".webm") ||
-                cleanReqPath.endsWith(".mov") || cleanReqPath.endsWith(".mkv") ||
+        val isAudio = (reqClassification.isAudio && (
                 cleanReqPath.contains("/videoplayback") || cleanReqPath.contains("googlevideo.com") ||
-                acceptHeader.contains("video/")
-
-        val isAudio = cleanReqPath.endsWith(".mp3") || cleanReqPath.endsWith(".m4a") ||
+                    cleanReqPath.contains("dash_audio") || cleanReqPath.contains("dash-audio") ||
+                    cleanReqPath.contains("cmaf_audio") || cleanReqPath.contains("cmaf-audio")
+                )) ||
+                cleanReqPath.endsWith(".mp3") || cleanReqPath.endsWith(".m4a") ||
                 cleanReqPath.endsWith(".aac") || cleanReqPath.endsWith(".wav") ||
                 cleanReqPath.endsWith(".ogg") || cleanReqPath.endsWith(".flac") ||
                 cleanReqPath.endsWith(".opus") || acceptHeader.contains("audio/")
+
+        val isVideo = !isAudio && (isStream || cleanReqPath.endsWith(".mp4") || cleanReqPath.endsWith(".webm") ||
+                cleanReqPath.endsWith(".mov") || cleanReqPath.endsWith(".mkv") ||
+                cleanReqPath.contains("/videoplayback") || cleanReqPath.contains("googlevideo.com") ||
+                acceptHeader.contains("video/"))
 
         val isUiIconOrFavicon = cleanReqPath.endsWith(".svg") || cleanReqPath.endsWith(".ico") ||
                 cleanReqPath.contains("/favicon") || cleanReqPath.contains("avatar") ||
@@ -599,7 +605,7 @@ object MediaCaptureEngine {
         val isImage = hasImageExt && !acceptHeader.contains("text/html")
 
         if (isVideo || isAudio || isImage) {
-            val cleanReqUrl = if (isVideo) MediaClassifier.cleanMediaUrl(reqUrl) else reqUrl
+            val cleanReqUrl = if (isVideo || isAudio) MediaClassifier.cleanMediaUrl(reqUrl) else reqUrl
             val alreadyCaptured = synchronized(seenInterceptUrls) {
                 !seenInterceptUrls.add(cleanReqUrl)
             }
@@ -618,7 +624,11 @@ object MediaCaptureEngine {
                 source = ExtractionSource.NETWORK_INTERCEPT,
                 baseUrl = baseUrl,
                 poster = ytPoster,
-                mimeHint = if (cleanReqPath.contains("/videoplayback")) "video/mp4" else null,
+                mimeHint = when {
+                    isAudio -> reqClassification.mimeType
+                    cleanReqPath.contains("/videoplayback") -> "video/mp4"
+                    else -> null
+                },
                 customCookie = cookieHeader
             )
             if (item != null) {
