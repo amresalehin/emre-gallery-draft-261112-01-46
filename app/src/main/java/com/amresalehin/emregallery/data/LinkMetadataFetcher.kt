@@ -724,17 +724,59 @@ object LinkMetadataFetcher {
             }
         }
 
-        // 8. Do not regex-scrape arbitrary script bundles. They contain unrelated page
-        // assets (logos, ads, widget thumbnails); the primary JSON-LD image is handled
-        // through jsonLdImageUrl and hydrated media is discovered from the live DOM.
-        
-        // 9. Pull background-image URLs from inline styles and <style> stylesheets
+        // 8. Read only semantically named media fields from Next.js bootstrap JSON.
+        // Never scan arbitrary JavaScript bundles: they are full of unrelated page assets.
+        val nextMediaKeyPattern = Regex("""(?is)["'][^"']*(?:image|photo|video|audio|media|thumbnail|poster|gallery|cover)[^"']*["']\s*:\s*["']((?:https?:)?//[^"']+?\.(?:jpe?g|png|webp|avif|mp4|webm|m3u8)(?:\?[^"']*)?)["']""")
+        doc.select("script[id]").filter { it.id().equals("__NEXT_DATA__", ignoreCase = true) }.forEach { script ->
+            val raw = script.data().ifBlank { script.html() }
+                .replace("\\/", "/")
+                .replace("\\u0026", "&")
+            nextMediaKeyPattern.findAll(raw).forEach { match ->
+                val candidate = match.groupValues[1].trim()
+                addCandidate(
+                    candidate,
+                    "Page Media",
+                    isVideo = candidate.contains(".mp4", true) ||
+                        candidate.contains(".webm", true) ||
+                        candidate.contains(".m3u8", true)
+                )
+            }
+        }
+
+        // 9. Keep inline and stylesheet backgrounds only when their semantic context
+        // indicates real page content (hero, article, gallery, media, etc.).
         val cssUrlRegex = Regex("""url\(\s*['"]?([^'")]+)['"]?\s*\)""", RegexOption.IGNORE_CASE)
-        doc.select("main [style*='url('], article [style*='url('], figure [style*='url('], [role='img'][style*='url(']").forEach { el ->
+        val contentContextPattern = Regex("""(?i)(hero|banner|content|gallery|post|article|media|photo|image|cover)""")
+        val uiContextPattern = Regex("""(?i)(logo|icon|avatar|emoji|badge|spinner|placeholder|sprite|advert|(^|[-_])ad($|[-_])|promo|sidebar|navigation|footer)""")
+        doc.select("[style*='url(']").forEach { el ->
+            val contextName = "${el.className()} ${el.id()} ${el.tagName()}".lowercase(Locale.ROOT)
+            val isContentContainer = el.parents().any { it.tagName() in setOf("main", "article", "figure") } ||
+                el.selectFirst("h1, h2, picture, img, video, figure") != null ||
+                contentContextPattern.containsMatchIn(contextName)
+            if (!isContentContainer || uiContextPattern.containsMatchIn(contextName)) return@forEach
             cssUrlRegex.findAll(el.attr("style")).forEach { m ->
                 val bgUrl = m.groupValues[1].trim()
                 if (!bgUrl.startsWith("data:", ignoreCase = true)) {
                     addCandidate(bgUrl, "Background Image")
+                }
+            }
+        }
+
+        // Stylesheet rules are accepted only when their selectors identify a content
+        // region, rather than arbitrary CSS assets across the entire site.
+        val cssRuleRegex = Regex("""(?s)([^{}]+)\{([^{}]*background(?:-image)?[^{}]*)\}""", RegexOption.IGNORE_CASE)
+        doc.select("style").forEach { style ->
+            val css = style.data().ifBlank { style.html() }
+            cssRuleRegex.findAll(css).forEach { rule ->
+                val selector = rule.groupValues[1].trim()
+                if (!contentContextPattern.containsMatchIn(selector) ||
+                    uiContextPattern.containsMatchIn(selector)
+                ) return@forEach
+                cssUrlRegex.findAll(rule.groupValues[2]).forEach { match ->
+                    val bgUrl = match.groupValues[1].trim()
+                    if (!bgUrl.startsWith("data:", ignoreCase = true)) {
+                        addCandidate(bgUrl, "Content Background")
+                    }
                 }
             }
         }

@@ -1009,9 +1009,12 @@ class PocketBookmarkUnitTest {
         assertTrue("Must extract unescaped video from NEXT_DATA", mediaUrls.any { it.contains("teaser.mp4") })
         assertTrue("Must extract unescaped photo from NEXT_DATA", mediaUrls.any { it.contains("photo_next.jpg") })
 
-        // Direct anchor video & lazy attributes
+        // Direct anchor video and the single best full-resolution image per element.
         assertTrue("Must extract direct anchor video", mediaUrls.any { it.contains("direct_clip.mp4") })
-        assertTrue("Must extract data-lazy-src", mediaUrls.any { it.contains("lazy_large.jpg") })
+        assertTrue("Must prefer data-original over lower-resolution lazy/source variants",
+            mediaUrls.any { it.contains("original_master.jpg") })
+        assertFalse("Must not add multiple source variants for one image element",
+            mediaUrls.any { it.contains("lazy_large.jpg") })
     }
 
     @Test
