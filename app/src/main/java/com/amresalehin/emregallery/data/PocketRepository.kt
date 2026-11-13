@@ -687,15 +687,8 @@ class PocketRepository(
         persist()
 
         if (autoFetchMetadata && cleanUrl.isNotBlank()) {
-            if (isMedia) {
-                fetchAndApplyMetadata(bookmark.id, cleanUrl)
-            } else {
-                fetchAndApplyMetadata(bookmark.id, cleanUrl) {
-                    // Start DOM deep scan only after static metadata/media intake is merged.
-                    // The scanner is seeded from the updated bookmark to avoid rediscovery.
-                    startDeepScan(bookmark.id, context)
-                }
-            }
+            // Concurrent discovery (specialized, static HTML and browser) replaces sequential intake.
+            fetchAndApplyMetadata(bookmark.id, cleanUrl)
         }
 
         return bookmark
@@ -715,10 +708,13 @@ class PocketRepository(
                 val targetUrl = url.ifBlank { current.sourceUrl }
                 if (targetUrl.isBlank()) return@launch
 
-                val meta = LinkMetadataFetcher.fetch(targetUrl)
+                val discovery = PocketDiscoveryCoordinator.discover(context, targetUrl)
+                val meta = discovery.metadata
                 val latest = _bookmarks.value.find { it.id == bookmarkId } ?: return@launch
 
-                val cleanDomain = latest.sourceDomain.ifBlank { MediaClassifier.cleanDomainFromUrl(targetUrl) }
+                val cleanDomain = latest.sourceDomain.ifBlank {
+                    meta.domain.ifBlank { MediaClassifier.cleanDomainFromUrl(targetUrl) }
+                }
                 val isTitleDefault = latest.title.isBlank() ||
                         latest.title.equals(cleanDomain, ignoreCase = true) ||
                         latest.title.equals(targetUrl, ignoreCase = true) ||
@@ -728,30 +724,77 @@ class PocketRepository(
                 val newDesc = if (latest.description.isBlank() && meta.description.isNotBlank()) meta.description else latest.description
                 val newDomain = if (latest.sourceDomain.isBlank() && meta.domain.isNotBlank()) meta.domain else latest.sourceDomain
 
-                val newItems = if (meta.mediaItems.isNotEmpty()) {
-                    MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems, latest.sourceUrl)
-                } else {
-                    latest.items
-                }
+                val discoveredInboxItems = discovery.items.map { item ->
+                    MediaInboxItem(
+                        id = item.id,
+                        title = item.title,
+                        localUri = "",
+                        sourceUrl = item.url,
+                        isVideo = item.isVideo,
+                        isAudio = item.isAudio,
+                        isStream = item.isStream,
+                        format = item.format,
+                        sizeBytes = item.sizeBytes ?: 0L
+                    )
+                }.filterNot { it.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true) }
 
-                val newPreview = if (newItems.isNotEmpty()) {
-                    newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                val newItems = if (discoveredInboxItems.isNotEmpty()) {
+                    MediaNormalizer.deduplicateMediaInboxItems(
+                        discoveredInboxItems + latest.items,
+                        latest.sourceUrl
+                    )
+                } else latest.items
+
+                val newPreview = when {
+                    meta.previewImageUrl.isNotBlank() -> meta.previewImageUrl
+                    newItems.isNotEmpty() -> newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
                         ?: newItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
                         ?: latest.previewImageUrl
-                } else {
-                    latest.previewImageUrl
+                    else -> latest.previewImageUrl
                 }
 
-                if (newTitle != latest.title || newDesc != latest.description || newPreview != latest.previewImageUrl ||
-                    newDomain != latest.sourceDomain || newItems != latest.items) {
-                    val updated = latest.copy(
+                updateBookmark(
+                    latest.copy(
                         title = newTitle,
                         description = newDesc,
                         previewImageUrl = newPreview,
                         sourceDomain = newDomain,
                         items = newItems
                     )
-                    updateBookmark(updated)
+                )
+
+                DownloadActivityManager.initialize(context)
+                val protectedKeys = latest.items
+                    .filter { it.localUri.isNotBlank() }
+                    .map { MediaClassifier.deduplicationKey(it.sourceUrl) }
+                    .toMutableSet()
+                DownloadActivityManager.activities.value
+                    .filter {
+                        it.status == DownloadActivityStatus.DOWNLOADING ||
+                        it.status == DownloadActivityStatus.RETRYING ||
+                        it.status == DownloadActivityStatus.PAUSED ||
+                        it.status == DownloadActivityStatus.FINISHED
+                    }
+                    .forEach { activity ->
+                        protectedKeys.add(MediaClassifier.deduplicationKey(activity.mediaUrl))
+                    }
+
+                val queueItems = MediaClassifier.deduplicateScrapedItems(discovery.items)
+                    .filter { MediaClassifier.deduplicationKey(it.url) !in protectedKeys }
+                if (queueItems.isNotEmpty()) {
+                    DownloadQueueManager.enqueueBatch(
+                        context = context,
+                        items = queueItems,
+                        referer = targetUrl,
+                        stackId = latest.id,
+                        stackTitle = newTitle.ifBlank { latest.title },
+                        sourceDomain = newDomain.ifBlank { cleanDomain },
+                        sourceUrl = targetUrl
+                    )
+                }
+
+                if (discovery.timedOut) {
+                    Log.w(TAG, "Pocket discovery reached 30 seconds; queued " + queueItems.size + " candidates collected before the deadline")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching metadata for bookmark $bookmarkId", e)

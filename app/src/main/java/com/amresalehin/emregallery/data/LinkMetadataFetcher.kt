@@ -34,7 +34,12 @@ object LinkMetadataFetcher {
     /**
      * Fetches metadata and all media items from a web URL asynchronously.
      */
-    suspend fun fetch(rawUrl: String): LinkMetadata = withContext(Dispatchers.IO) {
+    suspend fun fetch(
+        rawUrl: String,
+        includeSpecializedExtractor: Boolean = true,
+        networkTimeoutMillis: Long? = null,
+        allowHttpFallbacks: Boolean = true
+    ): LinkMetadata = withContext(Dispatchers.IO) {
         val trimmed = rawUrl.trim()
         if (trimmed.isBlank()) {
             return@withContext LinkMetadata(url = rawUrl)
@@ -56,7 +61,7 @@ object LinkMetadataFetcher {
         } else ""
 
         // 1. Specialized Extractor Engine (yt-dlp primary, gallery-dl secondary)
-        if (GalleryDlEngine.isAvailable() && GalleryDlEngine.checkSupport(normalizedUrl).isSupported) {
+        if (includeSpecializedExtractor && GalleryDlEngine.isAvailable() && GalleryDlEngine.checkSupport(normalizedUrl).isSupported) {
             try {
                 val gdlRes = GalleryDlEngine.extractMedia(normalizedUrl)
                 if (gdlRes.success && gdlRes.items.isNotEmpty()) {
@@ -101,7 +106,12 @@ object LinkMetadataFetcher {
         }
 
         try {
-            val response = OkHttpDownloader.getHtml(normalizedUrl, maxBytes = 8 * 1024 * 1024L)
+            val response = OkHttpDownloader.getHtml(
+                normalizedUrl,
+                maxBytes = 8 * 1024 * 1024L,
+                timeoutMillis = networkTimeoutMillis,
+                allowFallbacks = allowHttpFallbacks
+            )
             val finalUrl = response.finalUrl.ifBlank { normalizedUrl }
             val finalDomain = MediaClassifier.cleanDomainFromUrl(finalUrl).ifBlank { domain }
 
@@ -163,7 +173,7 @@ object LinkMetadataFetcher {
             }
 
             if (!response.isSuccessful || response.bodyString.isNullOrBlank()) {
-                if (GalleryDlEngine.isAvailable()) {
+                if (includeSpecializedExtractor && GalleryDlEngine.isAvailable()) {
                     val gdlRes = runCatching { GalleryDlEngine.extractMedia(finalUrl) }.getOrNull()
                     if (gdlRes != null && gdlRes.success && gdlRes.items.isNotEmpty()) {
                         val mediaItems = gdlRes.items.map { item ->

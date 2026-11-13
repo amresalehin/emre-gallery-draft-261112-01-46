@@ -556,11 +556,11 @@ def extract_yt_dlp(url, options_json="{}"):
             "ffmpeg_location": None,
             "prefer_ffmpeg": False,
             "format": "b[vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/bestvideo+bestaudio/best",
-            "socket_timeout": 35,
+            "socket_timeout": max(5, min(int(opts.get("timeout", 30)), 15)),
             "geo_bypass": True,
             "nocheckcertificate": True,
-            "retries": 3,
-            "fragment_retries": 3,
+            "retries": 1 if int(opts.get("timeout", 30)) <= 12 else 3,
+            "fragment_retries": 1 if int(opts.get("timeout", 30)) <= 12 else 3,
             "http_headers": http_headers,
             "extractor_args": {
                 "youtube": {

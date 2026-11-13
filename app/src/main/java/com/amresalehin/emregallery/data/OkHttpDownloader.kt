@@ -325,16 +325,30 @@ object OkHttpDownloader {
     suspend fun getHtml(
         url: String,
         referer: String? = null,
-        maxBytes: Long = 2 * 1024 * 1024
+        maxBytes: Long = 2 * 1024 * 1024,
+        timeoutMillis: Long? = null,
+        allowFallbacks: Boolean = true
     ): HttpResponse = withContext(Dispatchers.IO) {
+        val requestClient = timeoutMillis?.let { timeout ->
+            val bounded = timeout.coerceAtLeast(1L)
+            client.newBuilder()
+                .callTimeout(bounded, TimeUnit.MILLISECONDS)
+                .connectTimeout(minOf(bounded, 15_000L), TimeUnit.MILLISECONDS)
+                .readTimeout(minOf(bounded, 15_000L), TimeUnit.MILLISECONDS)
+                .writeTimeout(minOf(bounded, 15_000L), TimeUnit.MILLISECONDS)
+                .build()
+        } ?: client
         // Attempt 1: Standard OkHttp GET with mobile stealth headers
-        val res1 = executeOkHttpGet(url, referer, maxBytes, isDesktop = false)
+        val res1 = executeOkHttpGet(url, referer, maxBytes, isDesktop = false, requestClient = requestClient)
+        if (!allowFallbacks || (res1.isSuccessful && !res1.bodyString.isNullOrBlank())) {
+            return@withContext res1
+        }
         if (res1.isSuccessful && !res1.bodyString.isNullOrBlank()) {
             return@withContext res1
         }
 
         // Attempt 2: OkHttp GET with Desktop Chrome headers
-        val resDesktop = executeOkHttpGet(url, referer, maxBytes, isDesktop = true)
+        val resDesktop = executeOkHttpGet(url, referer, maxBytes, isDesktop = true, requestClient = requestClient)
         if (resDesktop.isSuccessful && !resDesktop.bodyString.isNullOrBlank()) {
             return@withContext resDesktop
         }
@@ -342,7 +356,7 @@ object OkHttpDownloader {
         // Attempt 3: If domain didn't have 'www.', try 'www.' (or vice-versa)
         val alternateUrl = getAlternateWwwUrl(url)
         if (!alternateUrl.isNullOrBlank() && alternateUrl != url) {
-            val resAlt = executeOkHttpGet(alternateUrl, referer, maxBytes, isDesktop = true)
+            val resAlt = executeOkHttpGet(alternateUrl, referer, maxBytes, isDesktop = true, requestClient = requestClient)
             if (resAlt.isSuccessful && !resAlt.bodyString.isNullOrBlank()) {
                 return@withContext resAlt
             }
@@ -362,7 +376,8 @@ object OkHttpDownloader {
         url: String,
         referer: String?,
         maxBytes: Long,
-        isDesktop: Boolean
+        isDesktop: Boolean,
+        requestClient: OkHttpClient = client
     ): HttpResponse {
         val reqBuilder = Request.Builder().url(url)
         if (!referer.isNullOrBlank()) {
@@ -382,7 +397,7 @@ object OkHttpDownloader {
         }
 
         return try {
-            client.newCall(reqBuilder.build()).execute().use { response ->
+            requestClient.newCall(reqBuilder.build()).execute().use { response ->
                 val code = response.code
                 val contentType = response.header("Content-Type")?.lowercase(Locale.ROOT) ?: ""
                 val finalUrl = response.request.url.toString()

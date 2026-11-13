@@ -1,6 +1,7 @@
 package com.amresalehin.emregallery
 
 import com.amresalehin.emregallery.data.BrowserTabSession
+import com.amresalehin.emregallery.data.PocketDiscoveryCoordinator
 import com.amresalehin.emregallery.data.MediaCategory
 import com.amresalehin.emregallery.data.MediaClassifier
 import com.amresalehin.emregallery.data.MediaProvenance
@@ -878,6 +879,14 @@ class MediaDeduplicationPureUnitTest {
             "https://cdn.example.com/assets/opaque-image-id",
             allowExtensionlessMedia = true
         ))
+    }
+
+    @Test
+    fun pocketDiscoveryRecognizesDirectMediaAndUsesThirtySecondDeadline() {
+        assertTrue(PocketDiscoveryCoordinator.isDirectMediaUrl("https://cdn.example.com/video.mp4"))
+        assertTrue(PocketDiscoveryCoordinator.isDirectMediaUrl("https://cdn.example.com/audio.m4a"))
+        assertFalse(PocketDiscoveryCoordinator.isDirectMediaUrl("https://example.com/article"))
+        assertEquals(30_000L, PocketDiscoveryCoordinator.MAX_DISCOVERY_DURATION_MS)
     }
 
 }
