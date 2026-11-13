@@ -949,8 +949,6 @@ object MediaClassifier {
             )
 
             val isGenericPath = pathSegment.isBlank() || pathSegment in genericFileNames || !pathSegment.contains('.')
-            val isImagePath = Regex("""\.(?:jpe?g|png|webp|avif|gif|bmp)$""", RegexOption.IGNORE_CASE)
-                .containsMatchIn(normalizedVideoPath)
 
             val filteredQuery = if (queryPart.isNotBlank()) {
                 val params = queryPart.split("&").filter { it.isNotBlank() }
@@ -966,7 +964,10 @@ object MediaClassifier {
                     // 3. CDN sizing parameters are stripped to group size variants together,
                     // UNLESS the path is a generic endpoint without identifying params (over-merging guard)
                     if (sizingParams.contains(key)) {
-                        return@filter (isImagePath || isGenericPath) && !hasIdentifyingParam
+                        // Retain sizing keys only for generic, non-identified endpoints.
+                        // Concrete media paths drop resize/format parameters so CDN
+                        // variants of the same asset share one canonical key.
+                        return@filter isGenericPath && !hasIdentifyingParam
                     }
                     true
                 }.sorted().joinToString("&")
