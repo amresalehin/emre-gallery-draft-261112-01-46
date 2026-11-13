@@ -535,6 +535,56 @@ object MediaClassifier {
         return true
     }
 
+
+    /**
+     * Strict intake gate for Pocket/site extraction. Unlike [isValidMedia], which also
+     * accepts platform-specific URLs that need further inspection, this only accepts
+     * resources with concrete media evidence: a known media extension, a media MIME /
+     * format query parameter, a known signed stream endpoint, or an explicit media DOM
+     * element supplied by the extractor.
+     *
+     * Extensionless URLs are never accepted merely because they were found in a page's
+     * resource list. The caller must explicitly identify them as an image/video/audio
+     * element. This keeps scripts, API endpoints, page routes and tracking resources out
+     * of Pocket while retaining extensionless CDN media.
+     */
+    fun isLikelyMediaCandidate(
+        url: String,
+        mimeHint: String? = null,
+        allowExtensionlessMedia: Boolean = false
+    ): Boolean {
+        if (url.isBlank() || !isValidMedia(url)) return false
+        if (url.startsWith("data:", ignoreCase = true)) return isSubstantialDataUri(url)
+
+        val mime = mimeHint.orEmpty().lowercase(Locale.ROOT).substringBefore(';').trim()
+        if (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/") ||
+            mime.contains("mpegurl") || mime.contains("dash+xml")
+        ) {
+            return true
+        }
+
+        val uri = runCatching { URI(url) }.getOrNull()
+        val path = uri?.path.orEmpty().lowercase(Locale.ROOT)
+        val extension = path.substringAfterLast('/', "").substringAfterLast('.', "")
+        if (extension in KNOWN_MEDIA_EXTENSIONS) return true
+
+        val host = uri?.host.orEmpty().lowercase(Locale.ROOT)
+        if (host.endsWith("googlevideo.com") && path.contains("/videoplayback")) return true
+
+        val query = uri?.rawQuery.orEmpty().lowercase(Locale.ROOT)
+        val mediaMimeQuery = Regex(
+            """(?:^|[&;])(?:mime|content-type|type)=(?:image|video|audio)(?:%2f|/)[a-z0-9.+-]+"""
+        ).containsMatchIn(query)
+        if (mediaMimeQuery) return true
+
+        val mediaFormatQuery = Regex(
+            """(?:^|[&;])(?:format|fm|ext)=(?:jpg|jpeg|png|webp|gif|svg|avif|bmp|heic|heif|mp4|webm|mov|mkv|avi|m3u8|mpd|mp3|m4a|aac|wav|ogg|opus|flac)(?:&|$)"""
+        ).containsMatchIn(query)
+        if (mediaFormatQuery) return true
+
+        return allowExtensionlessMedia
+    }
+
     data class ResolvedMediaInfo(
         val mediaUrl: String,
         val thumbnailUrl: String?,

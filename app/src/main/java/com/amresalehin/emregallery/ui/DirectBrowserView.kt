@@ -354,6 +354,7 @@ fun DirectBrowserView(
             context = context,
             bookmarkId = "browser_active_${System.currentTimeMillis()}",
             targetUrl = current,
+            maxScanDurationMs = 30_000L,
             scope = coroutineScope,
             onIncrementalMediaDiscovered = { newItems ->
                 val scraped = newItems.map { item ->

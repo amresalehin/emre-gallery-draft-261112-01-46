@@ -349,6 +349,27 @@ object LinkMetadataFetcher {
     }
 
     /**
+     * Selects one best responsive image candidate instead of turning every srcset
+     * resolution into a separate Pocket media item.
+     */
+    fun selectBestSrcsetUrl(srcset: String): String? {
+        if (srcset.isBlank()) return null
+        return srcset.split(",").mapNotNull { entry ->
+            val parts = entry.trim().split("\\s+".toRegex())
+            val candidateUrl = parts.firstOrNull()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val descriptor = parts.getOrNull(1).orEmpty()
+            val score = when {
+                descriptor.endsWith("w", ignoreCase = true) ->
+                    descriptor.dropLast(1).toDoubleOrNull() ?: 0.0
+                descriptor.endsWith("x", ignoreCase = true) ->
+                    (descriptor.dropLast(1).toDoubleOrNull() ?: 0.0) * 1000.0
+                else -> 0.0
+            }
+            candidateUrl to score
+        }.maxByOrNull { it.second }?.first
+    }
+
+    /**
      * Parses raw HTML string and extracts OpenGraph, Twitter, JSON-LD, document metadata,
      * and all discovered site media items with full <base href> resolution.
      * Pure and isolated for reliable testing.
@@ -487,40 +508,57 @@ object LinkMetadataFetcher {
         val items = mutableListOf<MediaInboxItem>()
         val seenUrls = mutableSetOf<String>()
 
-        fun addCandidate(rawUrl: String?, titleHint: String?, isVideo: Boolean = false) {
+        fun addCandidate(
+            rawUrl: String?,
+            titleHint: String?,
+            isVideo: Boolean = false,
+            isAudio: Boolean = false,
+            allowExtensionlessMedia: Boolean = false,
+            mimeHint: String? = null,
+            declaredWidth: Int? = null,
+            declaredHeight: Int? = null
+        ) {
             if (rawUrl.isNullOrBlank()) return
             val resolved = resolveAbsoluteUrl(baseUrl, rawUrl).trim()
             if (resolved.isBlank() || !resolved.startsWith("http", ignoreCase = true)) return
             if (seenUrls.contains(resolved)) return
+            if (!MediaClassifier.isLikelyMediaCandidate(
+                    resolved,
+                    mimeHint = mimeHint,
+                    allowExtensionlessMedia = allowExtensionlessMedia || isVideo || isAudio
+                )
+            ) return
 
-            // Filter out tracking pixels, spacers, transparent gifs, tiny badges
             val lower = resolved.lowercase(Locale.ROOT)
-            if (lower.contains("1x1") || lower.contains("spacer") || lower.contains("tracking") ||
-                lower.contains("pixel.gif") || lower.contains("beacon") || lower.contains("empty.png") ||
-                lower.contains("magnifying-glass") || lower.contains("close-icon")
-            ) {
-                return
-            }
+            val pathName = lower.substringBefore('?').substringBefore('#').substringAfterLast('/')
+            // Favicons, app icons and common UI chrome are previews, not site media.
+            if (lower.contains("google.com/s2/favicons") ||
+                pathName.startsWith("apple-touch-icon") ||
+                pathName.startsWith("favicon") ||
+                Regex("""^(?:logo|icon|avatar|badge|emoji|spinner|placeholder|sprite)(?:[-_.@]|$)""").containsMatchIn(pathName)
+            ) return
+
+            // Explicit dimensions are a reliable signal for tiny UI assets. Do not guess
+            // dimensions for unknown CDN URLs; those remain eligible for user filters.
+            if ((declaredWidth != null && declaredWidth in 1..95) ||
+                (declaredHeight != null && declaredHeight in 1..95)
+            ) return
 
             seenUrls.add(resolved)
             val cleanTitle = titleHint?.takeIf { it.isNotBlank() }
-                ?: resolved.substringAfterLast('/').substringBefore('?').takeIf { it.isNotBlank() && it.length > 2 }
+                ?: pathName.takeIf { it.isNotBlank() && it.length > 2 }
                 ?: defaultTitle.ifBlank { "Media ${items.size + 1}" }
 
-            val isM3u8 = lower.endsWith(".m3u8") || lower.contains(".m3u8?")
-            val isActualVideo = isVideo || isM3u8 || lower.endsWith(".mp4") || lower.endsWith(".webm") ||
-                    lower.endsWith(".mov") || lower.contains("/videoplayback") ||
-                    lower.contains(".mp4?") || lower.contains(".webm?")
-
+            val classification = MediaClassifier.classify(resolved, mimeHint)
+            val isM3u8 = lower.contains(".m3u8") || lower.substringBefore('?').endsWith(".mpd") ||
+                classification.isStream
+            val isActualAudio = isAudio || classification.isAudio
+            val isActualVideo = !isActualAudio && (isVideo || classification.isVideo || isM3u8)
             val format = when {
+                isM3u8 && lower.contains(".mpd") -> "MPD"
                 isM3u8 -> "M3U8"
-                lower.endsWith(".webm") || lower.contains(".webm?") -> "WEBM"
-                isActualVideo || lower.endsWith(".mp4") -> "MP4"
-                lower.endsWith(".png") -> "PNG"
-                lower.endsWith(".gif") -> "GIF"
-                lower.endsWith(".webp") -> "WEBP"
-                lower.endsWith(".svg") -> "SVG"
-                else -> "JPEG"
+                isActualAudio || isActualVideo -> classification.format
+                else -> classification.format
             }
 
             items.add(
@@ -530,6 +568,7 @@ object LinkMetadataFetcher {
                     localUri = "",
                     sourceUrl = resolved,
                     isVideo = isActualVideo,
+                    isAudio = isActualAudio,
                     isStream = isM3u8,
                     format = format,
                     dateAddedMillis = System.currentTimeMillis()
@@ -539,41 +578,51 @@ object LinkMetadataFetcher {
 
         fun processImageElement(img: org.jsoup.nodes.Element, defaultAlt: String) {
             val alt = img.attr("alt").ifBlank { img.attr("title") }.ifBlank { defaultAlt }
-            // 1. srcset and data-srcset
-            val srcset = img.attr("srcset").ifBlank { img.attr("data-srcset") }
-            if (srcset.isNotBlank()) {
-                parseSrcsetUrls(srcset).forEach { candidate ->
-                    addCandidate(candidate, alt)
-                }
-            }
-            // 2. High-res and lazy attributes
-            val lazyAttrs = listOf(
+            val classAndId = "${img.className()} ${img.id()}".lowercase(Locale.ROOT)
+            if (Regex("""(?:^|[\s_-])(?:logo|icon|avatar|emoji|badge|spinner|placeholder|sprite)(?:$|[\s_-])""")
+                    .containsMatchIn(classAndId)
+            ) return
+
+            val declaredWidth = img.attr("width").toIntOrNull()
+            val declaredHeight = img.attr("height").toIntOrNull()
+            if ((declaredWidth != null && declaredWidth in 1..95) ||
+                (declaredHeight != null && declaredHeight in 1..95)
+            ) return
+
+            val fullResolution = listOf(
                 "data-hi-res-src", "data-large-file", "data-original",
-                "data-src", "data-lazy-src", "data-zoom-src", "data-full-src",
-                "data-url", "src"
+                "data-zoom-src", "data-full-src"
+            ).firstNotNullOfOrNull { attr -> img.attr(attr).trim().takeIf { it.isNotBlank() } }
+            val srcset = img.attr("srcset").ifBlank { img.attr("data-srcset") }
+            val selectedSrcset = selectBestSrcsetUrl(srcset)
+            val lazyFallback = listOf("data-src", "data-lazy-src", "data-url", "src")
+                .firstNotNullOfOrNull { attr -> img.attr(attr).trim().takeIf { it.isNotBlank() } }
+            val selected = fullResolution ?: selectedSrcset ?: lazyFallback
+            if (selected.isNullOrBlank()) return
+
+            addCandidate(
+                selected,
+                alt,
+                allowExtensionlessMedia = true,
+                declaredWidth = declaredWidth,
+                declaredHeight = declaredHeight
             )
-            for (attr in lazyAttrs) {
-                val u = img.attr(attr).trim()
-                if (u.isNotBlank()) {
-                    addCandidate(u, alt)
-                }
-            }
         }
 
         // 1. Primary preview image always gets position 1 in the deck
         if (primaryPreviewUrl.isNotBlank()) {
-            addCandidate(primaryPreviewUrl, defaultTitle.ifBlank { "Cover Image" })
+            addCandidate(primaryPreviewUrl, defaultTitle.ifBlank { "Cover Image" }, allowExtensionlessMedia = true)
         }
 
         // 2. JSON-LD Image if distinct
         if (jsonLdImageUrl.isNotBlank()) {
-            addCandidate(jsonLdImageUrl, defaultTitle)
+            addCandidate(jsonLdImageUrl, defaultTitle, allowExtensionlessMedia = true)
         }
 
         // 3. Additional OpenGraph & Twitter Images
         doc.select("meta[property='og:image'], meta[name='og:image'], meta[property='og:image:secure_url'], meta[property='og:image:url']").forEach {
             val u = it.absUrl("content").ifBlank { it.attr("content") }
-            addCandidate(u, defaultTitle)
+            addCandidate(u, defaultTitle, allowExtensionlessMedia = true)
         }
         doc.select("meta[name='twitter:image'], meta[name='twitter:image:src'], meta[property='twitter:image']").forEach {
             val u = it.absUrl("content").ifBlank { it.attr("content") }
@@ -586,8 +635,6 @@ object LinkMetadataFetcher {
             if (u.isNotBlank()) addCandidate(u, defaultTitle.ifBlank { "Video" }, isVideo = true)
         }
         doc.select("video").forEach { vid ->
-            val poster = vid.absUrl("poster").ifBlank { vid.attr("poster") }
-            if (poster.isNotBlank()) addCandidate(poster, "Video Poster", isVideo = false)
             val src = vid.absUrl("src").ifBlank { vid.attr("src") }
                 .ifBlank { vid.absUrl("data-src").ifBlank { vid.attr("data-src") } }
                 .ifBlank { vid.absUrl("data-video-src").ifBlank { vid.attr("data-video-src") } }
@@ -598,6 +645,28 @@ object LinkMetadataFetcher {
                 if (sSrc.isNotBlank()) addCandidate(sSrc, "Video Stream", isVideo = true)
             }
         }
+        // Audio elements and their source children.
+        doc.select("audio").forEach { audio ->
+            val direct = audio.absUrl("src").ifBlank { audio.attr("src") }
+                .ifBlank { audio.absUrl("data-src").ifBlank { audio.attr("data-src") } }
+            if (direct.isNotBlank()) {
+                addCandidate(direct, "Audio", isAudio = true, allowExtensionlessMedia = true, mimeHint = audio.attr("type"))
+            }
+            audio.select("source").forEach { source ->
+                val sourceUrl = source.absUrl("src").ifBlank { source.attr("src") }
+                    .ifBlank { source.absUrl("data-src").ifBlank { source.attr("data-src") } }
+                if (sourceUrl.isNotBlank()) {
+                    addCandidate(
+                        sourceUrl,
+                        "Audio",
+                        isAudio = true,
+                        allowExtensionlessMedia = true,
+                        mimeHint = source.attr("type")
+                    )
+                }
+            }
+        }
+
         // Direct video anchor links or data-video containers
         doc.select("a[href*='.mp4'], a[href*='.webm'], a[href*='.m3u8'], [data-video-url]").forEach { el ->
             val vUrl = el.absUrl("data-video-url").ifBlank { el.attr("data-video-url") }
@@ -612,9 +681,17 @@ object LinkMetadataFetcher {
         doc.select("picture").forEach { pic ->
             pic.select("source").forEach { s ->
                 val sSrcset = s.attr("srcset").ifBlank { s.attr("data-srcset") }
-                parseSrcsetUrls(sSrcset).forEach { u -> addCandidate(u, "Picture Source") }
-                val src = s.attr("src").ifBlank { s.attr("data-src") }
-                if (src.isNotBlank()) addCandidate(src, "Picture Source")
+                val selected = selectBestSrcsetUrl(sSrcset)
+                    ?: s.attr("src").ifBlank { s.attr("data-src") }
+                if (selected.isNotBlank()) {
+                    addCandidate(
+                        selected,
+                        "Picture Source",
+                        allowExtensionlessMedia = true,
+                        declaredWidth = s.attr("width").toIntOrNull(),
+                        declaredHeight = s.attr("height").toIntOrNull()
+                    )
+                }
             }
             pic.select("img").forEach { img ->
                 processImageElement(img, "Picture Image")
@@ -647,40 +724,17 @@ object LinkMetadataFetcher {
             }
         }
 
-        // 8. Regex-scan <script>, JSON-LD, and __NEXT_DATA__ with \/ unescape
-        doc.select("script").forEach { script ->
-            val raw = script.data().ifBlank { script.html() }
-            if (raw.isNotBlank() && (raw.contains("http", ignoreCase = true) || raw.contains("\\/\\/"))) {
-                val unescaped = raw.replace("\\/", "/").replace("\\u0026", "&")
-                val mediaPattern = Regex("""(?:https?:)?//[^\s"'<>\\]+?\.(?:jpe?g|png|webp|avif|mp4|webm|m3u8)(?:\?[^\s"'<>\\]+?)?""", RegexOption.IGNORE_CASE)
-                mediaPattern.findAll(unescaped).forEach { m ->
-                    val clean = m.value.trimEnd('.', ',', ';', '\\', ')', '"', '\'', '}')
-                    addCandidate(clean, "Script Asset")
-                }
-            }
-        }
-
+        // 8. Do not regex-scrape arbitrary script bundles. They contain unrelated page
+        // assets (logos, ads, widget thumbnails); the primary JSON-LD image is handled
+        // through jsonLdImageUrl and hydrated media is discovered from the live DOM.
+        
         // 9. Pull background-image URLs from inline styles and <style> stylesheets
         val cssUrlRegex = Regex("""url\(\s*['"]?([^'")]+)['"]?\s*\)""", RegexOption.IGNORE_CASE)
-        doc.select("[style*='url('], [style*='background']").forEach { el ->
+        doc.select("main [style*='url('], article [style*='url('], figure [style*='url('], [role='img'][style*='url(']").forEach { el ->
             cssUrlRegex.findAll(el.attr("style")).forEach { m ->
                 val bgUrl = m.groupValues[1].trim()
                 if (!bgUrl.startsWith("data:", ignoreCase = true)) {
                     addCandidate(bgUrl, "Background Image")
-                }
-            }
-        }
-        doc.select("style").forEach { styleEl ->
-            val css = styleEl.data().ifBlank { styleEl.html() }
-            cssUrlRegex.findAll(css).forEach { m ->
-                val bgUrl = m.groupValues[1].trim()
-                if (!bgUrl.startsWith("data:", ignoreCase = true) &&
-                    (bgUrl.contains(".jpg", ignoreCase = true) || bgUrl.contains(".jpeg", ignoreCase = true) ||
-                     bgUrl.contains(".png", ignoreCase = true) || bgUrl.contains(".webp", ignoreCase = true) ||
-                     bgUrl.contains(".avif", ignoreCase = true) || bgUrl.contains(".mp4", ignoreCase = true) ||
-                     bgUrl.contains(".m3u8", ignoreCase = true))
-                ) {
-                    addCandidate(bgUrl, "Style Media")
                 }
             }
         }
@@ -690,7 +744,7 @@ object LinkMetadataFetcher {
             addCandidate(primaryPreviewUrl, defaultTitle)
         }
 
-        return items
+        return MediaNormalizer.deduplicateMediaInboxItems(items, baseUrl)
     }
 
     /**

@@ -687,9 +687,14 @@ class PocketRepository(
         persist()
 
         if (autoFetchMetadata && cleanUrl.isNotBlank()) {
-            fetchAndApplyMetadata(bookmark.id, cleanUrl)
-            if (!isMedia) {
-                startDeepScan(bookmark.id, context)
+            if (isMedia) {
+                fetchAndApplyMetadata(bookmark.id, cleanUrl)
+            } else {
+                fetchAndApplyMetadata(bookmark.id, cleanUrl) {
+                    // Start DOM deep scan only after static metadata/media intake is merged.
+                    // The scanner is seeded from the updated bookmark to avoid rediscovery.
+                    startDeepScan(bookmark.id, context)
+                }
             }
         }
 
@@ -699,8 +704,11 @@ class PocketRepository(
     /**
      * Automatically fetches metadata (title, description, and site media) for a bookmark and updates it.
      */
-    fun fetchAndApplyMetadata(bookmarkId: String, url: String = "") {
-        if (!activeExtractions.add(bookmarkId)) return
+    fun fetchAndApplyMetadata(bookmarkId: String, url: String = "", onComplete: (() -> Unit)? = null) {
+        if (!activeExtractions.add(bookmarkId)) {
+            onComplete?.invoke()
+            return
+        }
         coroutineScope.launch {
             try {
                 val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@launch
@@ -720,16 +728,10 @@ class PocketRepository(
                 val newDesc = if (latest.description.isBlank() && meta.description.isNotBlank()) meta.description else latest.description
                 val newDomain = if (latest.sourceDomain.isBlank() && meta.domain.isNotBlank()) meta.domain else latest.sourceDomain
 
-                val newItems = if (latest.items.isEmpty() && meta.mediaItems.isNotEmpty()) {
-                    meta.mediaItems
-                } else if (latest.items.isNotEmpty()) {
-                    if (meta.mediaItems.isNotEmpty()) {
-                        MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems, latest.sourceUrl)
-                    } else {
-                        latest.items
-                    }
+                val newItems = if (meta.mediaItems.isNotEmpty()) {
+                    MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems, latest.sourceUrl)
                 } else {
-                    emptyList()
+                    latest.items
                 }
 
                 val newPreview = if (newItems.isNotEmpty()) {
@@ -741,7 +743,7 @@ class PocketRepository(
                 }
 
                 if (newTitle != latest.title || newDesc != latest.description || newPreview != latest.previewImageUrl ||
-                    newDomain != latest.sourceDomain || newItems.size != latest.items.size) {
+                    newDomain != latest.sourceDomain || newItems != latest.items) {
                     val updated = latest.copy(
                         title = newTitle,
                         description = newDesc,
@@ -755,6 +757,7 @@ class PocketRepository(
                 Log.e(TAG, "Error fetching metadata for bookmark $bookmarkId", e)
             } finally {
                 activeExtractions.remove(bookmarkId)
+                runCatching { onComplete?.invoke() }
             }
         }
     }
@@ -801,7 +804,7 @@ class PocketRepository(
                 // Groups CDN size variants, selects the largest variant, and prioritizes video streams
                 val resolvedItems = if (newCandidates.isNotEmpty()) {
                     val combined = newCandidates + current.items
-                    MediaNormalizer.deduplicateMediaInboxItems(combined, current.sourceUrl).take(60)
+                    MediaNormalizer.deduplicateMediaInboxItems(combined, current.sourceUrl)
                 } else {
                     // Preserve existing cached media if refresh returned empty
                     current.items
@@ -851,12 +854,13 @@ class PocketRepository(
     fun isDeepScanning(bookmarkId: String): Boolean = _activeDeepScanId.value == bookmarkId
 
     /**
-     * Starts an on-demand hardware-accelerated deep scan for a bookmark.
-     * Runs continuously in the background until manually stopped by the user.
+     * Starts a bounded, on-demand deep scan for a bookmark. Stops at stable page bottom
+     * or when the engine reaches its safety limit; can also be stopped manually.
      */
     fun startDeepScan(bookmarkId: String, context: Context = this.context) {
         val target = _bookmarks.value.find { it.id == bookmarkId } ?: return
         if (target.sourceUrl.isBlank()) return
+        if (_activeDeepScanId.value == bookmarkId && PocketDeepScanEngine.isScanning(bookmarkId)) return
 
         _activeDeepScanId.value = bookmarkId
 
@@ -864,6 +868,7 @@ class PocketRepository(
             context = context,
             bookmarkId = bookmarkId,
             targetUrl = target.sourceUrl,
+            existingItems = target.items,
             scope = coroutineScope,
             onIncrementalMediaDiscovered = { newCandidates ->
                 val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@startScan

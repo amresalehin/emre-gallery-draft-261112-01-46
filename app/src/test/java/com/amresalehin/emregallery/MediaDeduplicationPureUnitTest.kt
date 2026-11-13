@@ -859,6 +859,27 @@ class MediaDeduplicationPureUnitTest {
         assertEquals("?1", headers["Sec-Ch-Ua-Mobile"])
         assertEquals("\"Android\"", headers["Sec-Ch-Ua-Platform"])
     }
+
+    @Test
+    fun pocketIntakeRejectsNonMediaResourcesButKeepsExplicitExtensionlessMedia() {
+        assertTrue(MediaClassifier.isLikelyMediaCandidate("https://cdn.example.com/photos/mountain-01.jpg"))
+        assertTrue(MediaClassifier.isLikelyMediaCandidate(
+            "https://cdn.example.com/videoplayback?id=stream-1&mime=video%2Fmp4"
+        ))
+        assertTrue(MediaClassifier.isLikelyMediaCandidate(
+            "https://cdn.example.com/assets/opaque-image-id",
+            mimeHint = "image/jpeg"
+        ))
+        assertFalse(MediaClassifier.isLikelyMediaCandidate("https://cdn.example.com/assets/opaque-resource-id"))
+        assertFalse(MediaClassifier.isLikelyMediaCandidate("https://cdn.example.com/api/media.json"))
+        assertFalse(MediaClassifier.isLikelyMediaCandidate("https://www.google.com/s2/favicons?domain=example.com&sz=128"))
+        assertFalse(MediaClassifier.isLikelyMediaCandidate("https://example.com/tracking/pixel.gif"))
+        assertTrue(MediaClassifier.isLikelyMediaCandidate(
+            "https://cdn.example.com/assets/opaque-image-id",
+            allowExtensionlessMedia = true
+        ))
+    }
+
 }
 
 

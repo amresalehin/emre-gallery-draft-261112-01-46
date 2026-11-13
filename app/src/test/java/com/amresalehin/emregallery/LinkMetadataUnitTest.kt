@@ -246,4 +246,40 @@ class LinkMetadataUnitTest {
         val tiktokSupport = com.amresalehin.emregallery.data.GalleryDlEngine.checkSupport("https://www.tiktok.com/@user/video/123456")
         assertTrue("TikTok should be recognized as supported extractor", tiktokSupport.isSupported)
     }
+
+    @Test
+    fun siteMediaExtractionKeepsOneBestSrcsetAndRejectsUiAssetsAndVideoPosters() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+              <head><title>Gallery</title></head>
+              <body>
+                <main>
+                  <img alt="Mountain" width="320" height="220"
+                       src="/images/mountain-small.jpg"
+                       srcset="/images/mountain-small.jpg 320w, /images/mountain-large.jpg 1400w" />
+                  <img class="site-icon" width="32" height="32" src="/assets/site-icon.png" />
+                  <img class="avatar" width="64" height="64" src="/users/avatar-123.jpg" />
+                  <video poster="/images/video-poster.jpg" src="/videos/clip.mp4"></video>
+                </main>
+                <script>
+                  window.unrelated = "https://cdn.example.com/assets/unrelated-widget.png";
+                </script>
+              </body>
+            </html>
+        """.trimIndent()
+
+        val items = LinkMetadataFetcher.parseHtml(html, "https://gallery.example.com/collection").mediaItems
+        val urls = items.map { it.sourceUrl }
+
+        assertTrue(urls.contains("https://gallery.example.com/images/mountain-large.jpg"))
+        assertFalse(urls.contains("https://gallery.example.com/images/mountain-small.jpg"))
+        assertFalse(urls.contains("https://gallery.example.com/assets/site-icon.png"))
+        assertFalse(urls.contains("https://gallery.example.com/users/avatar-123.jpg"))
+        assertFalse(urls.contains("https://gallery.example.com/images/video-poster.jpg"))
+        assertFalse(urls.contains("https://cdn.example.com/assets/unrelated-widget.png"))
+        assertTrue(urls.contains("https://gallery.example.com/videos/clip.mp4"))
+        assertEquals(2, items.size)
+    }
+
 }
