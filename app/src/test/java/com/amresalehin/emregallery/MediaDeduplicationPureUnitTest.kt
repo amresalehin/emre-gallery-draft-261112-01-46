@@ -880,6 +880,35 @@ class MediaDeduplicationPureUnitTest {
         ))
     }
 
+
+    @Test
+    fun pocketMediaInventoryPreservesSeparateAudioTrackAlongsideVideo() {
+        val video = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "video-track",
+            title = "Video track",
+            localUri = "",
+            sourceUrl = "https://cdn.example.com/movie/video.mp4",
+            isVideo = true,
+            format = "MP4"
+        )
+        val audio = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "audio-track",
+            title = "Audio track",
+            localUri = "",
+            sourceUrl = "https://cdn.example.com/movie/audio.m4a",
+            isAudio = true,
+            format = "M4A"
+        )
+
+        val result = com.amresalehin.emregallery.data.MediaNormalizer
+            .deduplicateMediaInboxItems(listOf(video, audio), "https://example.com/article")
+
+        assertEquals("Pocket must retain both independently addressable tracks", 2, result.size)
+        assertTrue(result.any { it.id == "video-track" && it.isVideo })
+        assertTrue(result.any { it.id == "audio-track" && it.isAudio })
+    }
+
+
 }
 
 
