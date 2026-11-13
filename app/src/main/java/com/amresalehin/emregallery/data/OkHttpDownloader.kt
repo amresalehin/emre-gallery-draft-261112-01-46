@@ -562,7 +562,8 @@ object OkHttpDownloader {
         headers: Map<String, String>? = null,
         domain: String? = null,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null,
-        targetDirectory: File? = null
+        targetDirectory: File? = null,
+        onProgressWithSpeed: ((bytesRead: Long, totalBytes: Long, speedBytesPerSec: Long) -> Unit)? = null
     ): DownloadResult = withContext(Dispatchers.IO) {
         val effectiveDomain = domain?.takeIf { it.isNotBlank() }
             ?: extractDomain(referer ?: mediaUrl).takeIf { it != "general" && it != "localhost" }
@@ -831,6 +832,9 @@ object OkHttpDownloader {
                 }
 
                 var downloaded = if (append) existingBytes else 0L
+                var lastEmitTimeNs = System.nanoTime()
+                var bytesSinceLastEmit = 0L
+                var smoothedSpeedBps = 0L
 
                 body.byteStream().use { input: InputStream ->
                     FileOutputStream(tempFile, append).use { output ->
@@ -839,7 +843,30 @@ object OkHttpDownloader {
                         while (input.read(buffer).also { bytesRead = it } != -1) {
                             output.write(buffer, 0, bytesRead)
                             downloaded += bytesRead
+                            bytesSinceLastEmit += bytesRead
                             onProgress?.invoke(downloaded, totalBytes)
+                            if (onProgressWithSpeed != null) {
+                                val nowNs = System.nanoTime()
+                                val elapsedNs = nowNs - lastEmitTimeNs
+                                if (elapsedNs >= 250_000_000L) {
+                                    val instantBps = (bytesSinceLastEmit * 1_000_000_000L) / elapsedNs.coerceAtLeast(1L)
+                                    smoothedSpeedBps = if (smoothedSpeedBps <= 0L) {
+                                        instantBps
+                                    } else {
+                                        (smoothedSpeedBps * 7L + instantBps * 3L) / 10L
+                                    }
+                                    onProgressWithSpeed.invoke(downloaded, totalBytes, smoothedSpeedBps)
+                                    lastEmitTimeNs = nowNs
+                                    bytesSinceLastEmit = 0L
+                                }
+                            }
+                        }
+                        if (onProgressWithSpeed != null && bytesSinceLastEmit > 0L) {
+                            val nowNs = System.nanoTime()
+                            val elapsedNs = (nowNs - lastEmitTimeNs).coerceAtLeast(1_000_000L)
+                            val instantBps = (bytesSinceLastEmit * 1_000_000_000L) / elapsedNs
+                            val finalSpeed = if (smoothedSpeedBps <= 0L) instantBps else smoothedSpeedBps
+                            onProgressWithSpeed.invoke(downloaded, totalBytes, finalSpeed)
                         }
                         output.flush()
                     }

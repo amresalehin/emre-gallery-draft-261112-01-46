@@ -20,7 +20,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
@@ -32,6 +34,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -41,14 +44,24 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.amresalehin.emregallery.R
+import com.amresalehin.emregallery.data.BrowserSession
 import com.amresalehin.emregallery.data.CustomAlbum
+import com.amresalehin.emregallery.data.DownloadQueueManager
+import com.amresalehin.emregallery.data.DownloaderSession
+import com.amresalehin.emregallery.data.ExtractionCoordinator
 import com.amresalehin.emregallery.data.LockedVaultManager
+import com.amresalehin.emregallery.data.MediaClassifier
 import com.amresalehin.emregallery.data.MediaItem
 import com.amresalehin.emregallery.data.MediaRepository
+import com.amresalehin.emregallery.data.OkHttpDownloader
+import com.amresalehin.emregallery.data.PocketRepository
 import com.amresalehin.emregallery.data.ThumbnailPrewarmManager
 import com.amresalehin.emregallery.data.PreferencesRepository
 import com.amresalehin.emregallery.ocr.TesseractOcr
@@ -58,6 +71,12 @@ import com.amresalehin.emregallery.face.FaceEngineRegistry
 import com.amresalehin.emregallery.face.FaceIndexingRepository
 import com.amresalehin.emregallery.face.FaceRecognitionSettings
 import com.amresalehin.emregallery.data.StoryGroup
+
+data class IncomingLinkRequest(
+    val id: Long,
+    val url: String,
+    val title: String = ""
+)
 
 data class NavBackStackEntry(
     val destination: Destination,
@@ -79,7 +98,10 @@ val LocalViewerCoordinatedProgress = compositionLocalOf<() -> Float> { { 0f } }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GalleryApp() {
+fun GalleryApp(
+    incomingLinkRequest: IncomingLinkRequest? = null,
+    onConsumeIncomingLink: () -> Unit = {}
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val prefs = remember { PreferencesRepository(context.applicationContext) }
@@ -144,6 +166,7 @@ fun GalleryApp() {
     var inboxInitialOpenBrowser by remember { mutableStateOf(false) }
     var selectedBookmarkDetailStack by remember { mutableStateOf<com.amresalehin.emregallery.data.MediaInboxStack?>(null) }
     var browserInitialUrl by remember { mutableStateOf("") }
+    var browserLaunchId by remember { mutableLongStateOf(0L) }
     var isPocketDetailOpen by remember { mutableStateOf(false) }
 
     var isRefreshing by remember { mutableStateOf(false) }
@@ -1162,10 +1185,13 @@ fun GalleryApp() {
                                 stack = activeStack,
                                 onBack = { performBackNavigation() },
                                 onOpenBrowser = { url ->
-                                    browserInitialUrl = url
+                                    BrowserSession.savedBrowserSite = ""
+                                    BrowserSession.pendingScrollRestore = false
+                                    browserLaunchId++
                                     navigateTo(
                                         dest = Destination.BROWSER,
-                                        rememberPrevious = true
+                                        rememberPrevious = true,
+                                        newBrowserInitialUrl = url
                                     )
                                 },
                                 onDelete = {
@@ -1355,44 +1381,46 @@ fun GalleryApp() {
                             openMediaInViewer(target, viewerItems)
                         }
                     )
-                    Destination.BROWSER -> DirectBrowserView(
-                        initialUrl = browserInitialUrl,
-                        onClose = {
-                            browserInitialUrl = ""
-                            performBackNavigation()
-                        },
-                        onMenuClick = { showSidePanel = true },
-                        onUrlChange = { url ->
-                            browserInitialUrl = url
-                        },
-                        onMediaExtracted = { item -> com.amresalehin.emregallery.data.DownloaderSession.addDiscoveredItem(item) },
-                        onBatchExtracted = { batch, title, _ -> com.amresalehin.emregallery.data.DownloaderSession.addDiscoveredItems(batch, title) },
-                        onOpenDownloads = {
-                            navigateTo(
-                                dest = Destination.MEDIA_INBOX,
-                                rememberPrevious = true,
-                                newInboxInitialViewMode = DownloaderViewMode.ACTIVITY_PAGE,
-                                newInboxInitialOpenBrowser = false
-                            )
-                        },
-                        onOpenDiscoveredMedia = {
-                            navigateTo(
-                                dest = Destination.MEDIA_INBOX,
-                                rememberPrevious = true,
-                                newInboxInitialViewMode = DownloaderViewMode.DISCOVERED_MEDIA,
-                                newInboxInitialOpenBrowser = false
-                            )
-                        },
-                        onSwitchToMediaTab = {
-                            navigateTo(
-                                dest = Destination.MEDIA_INBOX,
-                                rememberPrevious = true,
-                                newInboxInitialViewMode = DownloaderViewMode.ACTIVITY_PAGE,
-                                newInboxInitialOpenBrowser = false
-                            )
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    Destination.BROWSER -> key(browserLaunchId) {
+                        DirectBrowserView(
+                            initialUrl = browserInitialUrl,
+                            onClose = {
+                                browserInitialUrl = ""
+                                performBackNavigation()
+                            },
+                            onMenuClick = { showSidePanel = true },
+                            onUrlChange = { url ->
+                                browserInitialUrl = url
+                            },
+                            onMediaExtracted = { item -> com.amresalehin.emregallery.data.DownloaderSession.addDiscoveredItem(item) },
+                            onBatchExtracted = { batch, title, _ -> com.amresalehin.emregallery.data.DownloaderSession.addDiscoveredItems(batch, title) },
+                            onOpenDownloads = {
+                                navigateTo(
+                                    dest = Destination.MEDIA_INBOX,
+                                    rememberPrevious = true,
+                                    newInboxInitialViewMode = DownloaderViewMode.ACTIVITY_PAGE,
+                                    newInboxInitialOpenBrowser = false
+                                )
+                            },
+                            onOpenDiscoveredMedia = {
+                                navigateTo(
+                                    dest = Destination.MEDIA_INBOX,
+                                    rememberPrevious = true,
+                                    newInboxInitialViewMode = DownloaderViewMode.DISCOVERED_MEDIA,
+                                    newInboxInitialOpenBrowser = false
+                                )
+                            },
+                            onSwitchToMediaTab = {
+                                navigateTo(
+                                    dest = Destination.MEDIA_INBOX,
+                                    rememberPrevious = true,
+                                    newInboxInitialViewMode = DownloaderViewMode.ACTIVITY_PAGE,
+                                    newInboxInitialOpenBrowser = false
+                                )
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     Destination.SEARCH -> {
                         val searchScopeMedia = remember(media, hidden, inBin, archive) {
                             media.filter {
@@ -1861,6 +1889,342 @@ fun GalleryApp() {
             onGridStyleChange = { scope.launch { prefs.setGridStyle(it) } },
             onDismiss = { showHomeViewOptionsSheet = false }
         )
+    }
+
+    if (incomingLinkRequest != null) {
+        IncomingLinkBottomSheet(
+            request = incomingLinkRequest,
+            onDismiss = onConsumeIncomingLink,
+            onSaveToPocket = { req ->
+                val pocketRepo = PocketRepository.getInstance(context)
+                pocketRepo.addBookmark(
+                    title = req.title,
+                    url = req.url,
+                    autoFetchMetadata = true
+                )
+                onConsumeIncomingLink()
+                navigateTo(
+                    dest = Destination.POCKET,
+                    rememberPrevious = true
+                )
+                scope.launch {
+                    snackbarHostState.showSnackbar("Saved to Pocket", duration = SnackbarDuration.Short)
+                }
+            },
+            onOpenInBrowser = { req ->
+                BrowserSession.savedBrowserSite = ""
+                BrowserSession.pendingScrollRestore = false
+                browserLaunchId++
+                onConsumeIncomingLink()
+                navigateTo(
+                    dest = Destination.BROWSER,
+                    rememberPrevious = true,
+                    newBrowserInitialUrl = req.url
+                )
+            },
+            onOpenDiscoveredMedia = {
+                onConsumeIncomingLink()
+                navigateTo(
+                    dest = Destination.MEDIA_INBOX,
+                    rememberPrevious = true,
+                    newInboxInitialViewMode = DownloaderViewMode.DISCOVERED_MEDIA,
+                    newInboxInitialOpenBrowser = false
+                )
+            },
+            onOpenDownloadsActivity = {
+                onConsumeIncomingLink()
+                navigateTo(
+                    dest = Destination.MEDIA_INBOX,
+                    rememberPrevious = true,
+                    newInboxInitialViewMode = DownloaderViewMode.ACTIVITY_PAGE,
+                    newInboxInitialOpenBrowser = false
+                )
+                scope.launch {
+                    snackbarHostState.showSnackbar("Download queued", duration = SnackbarDuration.Short)
+                }
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun IncomingLinkBottomSheet(
+    request: IncomingLinkRequest,
+    onDismiss: () -> Unit,
+    onSaveToPocket: (IncomingLinkRequest) -> Unit,
+    onOpenInBrowser: (IncomingLinkRequest) -> Unit,
+    onOpenDiscoveredMedia: () -> Unit,
+    onOpenDownloadsActivity: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val coordinator = remember(request.id) { ExtractionCoordinator(context) }
+    val extractionState by coordinator.state.collectAsStateWithLifecycle()
+    var hasStartedExtraction by remember(request.id) { mutableStateOf(false) }
+
+    DisposableEffect(request.id) {
+        onDispose {
+            coordinator.cancel()
+        }
+    }
+
+    val domain = remember(request.url) {
+        MediaClassifier.cleanDomainFromUrl(request.url).ifBlank { request.url }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = {
+            coordinator.cancel()
+            onDismiss()
+        },
+        modifier = Modifier.testTag("incoming_link_bottom_sheet")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.Link,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.incoming_link_sheet_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = request.title.ifBlank { domain },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = request.url,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            if (!hasStartedExtraction) {
+                IncomingLinkActionCard(
+                    icon = Icons.Default.Bookmark,
+                    title = stringResource(R.string.incoming_link_save_pocket),
+                    subtitle = stringResource(R.string.incoming_link_save_pocket_subtitle),
+                    testTag = "incoming_link_save_pocket_btn",
+                    onClick = { onSaveToPocket(request) }
+                )
+
+                IncomingLinkActionCard(
+                    icon = Icons.Default.Download,
+                    title = stringResource(R.string.incoming_link_extract_download),
+                    subtitle = stringResource(R.string.incoming_link_extract_download_subtitle),
+                    testTag = "incoming_link_extract_download_btn",
+                    onClick = {
+                        hasStartedExtraction = true
+                        DownloaderSession.startSession(request.url)
+                        coordinator.extract(request.url, scope)
+                    }
+                )
+
+                IncomingLinkActionCard(
+                    icon = Icons.Default.Language,
+                    title = stringResource(R.string.incoming_link_open_browser),
+                    subtitle = stringResource(R.string.incoming_link_open_browser_subtitle),
+                    testTag = "incoming_link_open_browser_btn",
+                    onClick = { onOpenInBrowser(request) }
+                )
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            if (extractionState.isRunning) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 2.5.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (extractionState.items.isNotEmpty()) Icons.Default.CheckCircle else Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = if (extractionState.items.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                text = when {
+                                    extractionState.isRunning -> extractionState.statusMessage.ifBlank {
+                                        stringResource(R.string.incoming_link_extracting)
+                                    }
+                                    extractionState.items.isNotEmpty() -> {
+                                        "Found ${extractionState.items.size} media item${if (extractionState.items.size > 1) "s" else ""}"
+                                    }
+                                    else -> extractionState.errorMessage?.takeIf { it.isNotBlank() }
+                                        ?: stringResource(R.string.incoming_link_no_media)
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        if (!extractionState.isRunning && extractionState.items.size == 1) {
+                            val singleItem = extractionState.items.first()
+                            Button(
+                                onClick = {
+                                    val safeDomain = OkHttpDownloader.extractDomain(request.url)
+                                    DownloadQueueManager.enqueueDownload(
+                                        context = context,
+                                        item = singleItem,
+                                        referer = request.url,
+                                        stackId = "shared_${request.url.hashCode()}",
+                                        stackTitle = extractionState.pageTitle.ifBlank { safeDomain },
+                                        sourceDomain = safeDomain,
+                                        sourceUrl = request.url
+                                    )
+                                    onOpenDownloadsActivity()
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("incoming_link_download_now_btn")
+                            ) {
+                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(stringResource(R.string.incoming_link_download_now))
+                            }
+                        } else if (extractionState.items.isNotEmpty()) {
+                            Button(
+                                onClick = {
+                                    DownloaderSession.addDiscoveredItems(extractionState.items, extractionState.pageTitle.ifBlank { request.title })
+                                    onOpenDiscoveredMedia()
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("incoming_link_view_discovered_btn")
+                            ) {
+                                Text(stringResource(R.string.incoming_link_view_discovered, extractionState.items.size))
+                            }
+                        }
+
+                        if (!extractionState.isRunning && extractionState.items.isEmpty()) {
+                            Button(
+                                onClick = { onOpenInBrowser(request) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("incoming_link_fallback_browser_btn")
+                            ) {
+                                Icon(Icons.Default.Language, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(stringResource(R.string.incoming_link_open_browser))
+                            }
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(
+                    onClick = {
+                        coordinator.cancel()
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("incoming_link_dismiss_btn")
+                ) {
+                    Text(stringResource(R.string.incoming_link_dismiss))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IncomingLinkActionCard(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .testTag(testTag)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 

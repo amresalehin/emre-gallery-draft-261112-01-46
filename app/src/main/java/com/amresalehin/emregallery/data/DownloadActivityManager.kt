@@ -614,6 +614,7 @@ object DownloadActivityManager {
                 localUri = localUri,
                 bytesRead = sizeBytes,
                 totalBytes = sizeBytes,
+                speedBytesPerSec = 0L,
                 timestampMillis = System.currentTimeMillis()
             )
         }
@@ -704,6 +705,7 @@ object DownloadActivityManager {
                 maxRetries = 5,
                 nextRetryTimestampMillis = nextRetryEpoch,
                 retryDelaySeconds = delaySec,
+                speedBytesPerSec = 0L,
                 errorMessage = null // Never mark as failed until all 5 automatic retries conclude
             )
             _activities.value = current
@@ -718,6 +720,7 @@ object DownloadActivityManager {
                 status = DownloadActivityStatus.FAILED,
                 nextRetryTimestampMillis = null,
                 retryDelaySeconds = null,
+                speedBytesPerSec = 0L,
                 errorMessage = errorMessage ?: "Download failed"
             )
             _activities.value = current

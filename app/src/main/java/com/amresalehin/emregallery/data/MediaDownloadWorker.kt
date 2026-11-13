@@ -165,9 +165,9 @@ class MediaDownloadWorker(
                     downloadId = itemId,
                     headers = downloadHeaders,
                     domain = effectiveDomain,
-                    onProgress = { bytesRead, totalBytes ->
+                    onProgressWithSpeed = { bytesRead, totalBytes, speedBps ->
                         val ratio = if (totalBytes > 0L) (bytesRead.toFloat() / totalBytes.toFloat()).coerceIn(0.1f, 0.95f) else 0.5f
-                        DownloadActivityManager.updateProgress(itemId, ratio, bytesRead, totalBytes, 0L)
+                        DownloadActivityManager.updateProgress(itemId, ratio, bytesRead, totalBytes, speedBps)
                     }
                 )
                 if (okResult.isSuccessful && okResult.file != null && okResult.file.exists() && okResult.file.length() > 0L) {
@@ -185,7 +185,10 @@ class MediaDownloadWorker(
                     referer = referer ?: sourceUrl,
                     headers = downloadHeaders,
                     cookies = cookieString,
-                    domain = effectiveDomain
+                    domain = effectiveDomain,
+                    onProgress = { ratio, bytesRead, totalBytes, speedBps ->
+                        DownloadActivityManager.updateProgress(itemId, ratio, bytesRead, totalBytes, speedBps)
+                    }
                 )
                 // If targetUrl != mediaUrl and extractor returned null, retry with mediaUrl directly
                 if ((downloadedFile == null || !downloadedFile.exists() || downloadedFile.length() == 0L) && targetUrl != mediaUrl) {
@@ -196,7 +199,10 @@ class MediaDownloadWorker(
                         referer = referer ?: sourceUrl,
                         headers = downloadHeaders,
                         cookies = cookieString,
-                        domain = effectiveDomain
+                        domain = effectiveDomain,
+                        onProgress = { ratio, bytesRead, totalBytes, speedBps ->
+                            DownloadActivityManager.updateProgress(itemId, ratio, bytesRead, totalBytes, speedBps)
+                        }
                     )
                 }
             }
@@ -211,7 +217,11 @@ class MediaDownloadWorker(
                     referer = referer ?: sourceUrl,
                     downloadId = itemId,
                     headers = downloadHeaders,
-                    domain = effectiveDomain
+                    domain = effectiveDomain,
+                    onProgressWithSpeed = { bytesRead, totalBytes, speedBps ->
+                        val ratio = if (totalBytes > 0L) (bytesRead.toFloat() / totalBytes.toFloat()).coerceIn(0.1f, 0.95f) else 0.5f
+                        DownloadActivityManager.updateProgress(itemId, ratio, bytesRead, totalBytes, speedBps)
+                    }
                 )
                 if (fallbackResult.isSuccessful && fallbackResult.file != null && fallbackResult.file.exists() && fallbackResult.file.length() > 0L) {
                     downloadedFile = fallbackResult.file

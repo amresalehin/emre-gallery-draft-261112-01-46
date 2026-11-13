@@ -1,6 +1,7 @@
 package com.amresalehin.emregallery
 
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.fragment.app.FragmentActivity
@@ -8,10 +9,14 @@ import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.amresalehin.emregallery.data.MediaClassifier
 import com.amresalehin.emregallery.data.PreferencesRepository
 import com.amresalehin.emregallery.ui.GalleryApp
+import com.amresalehin.emregallery.ui.IncomingLinkRequest
 import com.amresalehin.emregallery.ui.theme.EmreGalleryTheme
 
 class MainActivity : FragmentActivity() {
@@ -19,6 +24,8 @@ class MainActivity : FragmentActivity() {
     private val prefs by lazy {
         getSharedPreferences("window_refresh_rate_state", Context.MODE_PRIVATE)
     }
+
+    private var incomingLinkRequest by mutableStateOf<IncomingLinkRequest?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,15 +36,81 @@ class MainActivity : FragmentActivity() {
         }
         applyHighRefreshRate()
         warmupChromiumEngine()
+        handleIncomingIntent(intent)
 
         setContent {
             val preferences = remember { PreferencesRepository(applicationContext) }
             val initialTheme = remember { preferences.getThemeSync() }
             val theme by preferences.theme.collectAsStateWithLifecycle(initialValue = initialTheme)
             EmreGalleryTheme(theme) {
-                GalleryApp()
+                GalleryApp(
+                    incomingLinkRequest = incomingLinkRequest,
+                    onConsumeIncomingLink = { incomingLinkRequest = null }
+                )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action ?: return
+        when (action) {
+            Intent.ACTION_VIEW -> {
+                val rawUrl = intent.dataString?.trim().orEmpty()
+                val extracted = extractHttpUrl(rawUrl)
+                if (extracted != null) {
+                    val subjectTitle = intent.getStringExtra(Intent.EXTRA_SUBJECT)?.trim().orEmpty()
+                    incomingLinkRequest = IncomingLinkRequest(
+                        id = System.nanoTime(),
+                        url = extracted,
+                        title = subjectTitle
+                    )
+                }
+            }
+            Intent.ACTION_SEND -> {
+                val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+                val sharedSubject = intent.getStringExtra(Intent.EXTRA_SUBJECT)?.trim().orEmpty()
+                val extracted = extractHttpUrl(sharedText) ?: extractHttpUrl(sharedSubject)
+                if (extracted != null) {
+                    val titleHint = sharedSubject.takeIf { it.isNotBlank() && it != extracted }
+                        ?: deriveTitleFromSharedText(sharedText, extracted)
+                    incomingLinkRequest = IncomingLinkRequest(
+                        id = System.nanoTime(),
+                        url = extracted,
+                        title = titleHint
+                    )
+                }
+            }
+        }
+    }
+
+    private fun extractHttpUrl(rawText: String): String? {
+        if (rawText.isBlank()) return null
+        val urlRegex = Regex("""https?://[^\s<>"']+""", RegexOption.IGNORE_CASE)
+        val match = urlRegex.find(rawText)?.value
+            ?.trimEnd('.', ',', ';', ')', ']', '>', '"', '\'')
+        if (!match.isNullOrBlank() && MediaClassifier.isValidWebUrl(match)) {
+            return match
+        }
+        val singleToken = rawText.trim().takeIf { !it.contains(' ') && it.contains('.') }
+        if (singleToken != null) {
+            val formatted = MediaClassifier.formatQueryOrUrl(singleToken)
+            if (MediaClassifier.isValidWebUrl(formatted)) {
+                return formatted
+            }
+        }
+        return null
+    }
+
+    private fun deriveTitleFromSharedText(sharedText: String, extractedUrl: String): String {
+        val cleaned = sharedText.replace(extractedUrl, "").trim()
+        return cleaned.trimEnd('-', ':', '|', ' ').trim().take(120)
     }
 
     override fun onResume() {

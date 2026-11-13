@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 import traceback
 import hashlib
 import threading
@@ -873,7 +874,19 @@ def resolve_ytdlp_formats(url, referer="", user_agent=None, cookies=None, header
         return json.dumps({"success": False, "error": "%s: %s" % (exc.__class__.__name__, exc)})
 
 
-def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_headers):
+def _emit_progress(progress_listener, downloaded, total, speed):
+    if progress_listener is None:
+        return
+    try:
+        d = int(downloaded or 0)
+        t = int(total or 0)
+        s = int(speed or 0)
+        progress_listener.onProgress(d, t, s)
+    except Exception:
+        pass
+
+
+def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_headers, progress_listener=None):
     """Downloads media exclusively via yt-dlp."""
     if not YTDLP_AVAILABLE:
         return False
@@ -893,6 +906,25 @@ def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_h
         if extra_headers:
             http_headers.update(extra_headers)
 
+        last_emit = [0.0]
+
+        def _progress_hook(status):
+            if progress_listener is None or not isinstance(status, dict):
+                return
+            st = status.get("status")
+            now = time.monotonic()
+            if st == "downloading":
+                if now - last_emit[0] < 0.25:
+                    return
+                last_emit[0] = now
+                downloaded = status.get("downloaded_bytes") or 0
+                total = status.get("total_bytes") or status.get("total_bytes_estimate") or 0
+                speed = status.get("speed") or 0
+                _emit_progress(progress_listener, downloaded, total, speed)
+            elif st == "finished":
+                total = status.get("total_bytes") or status.get("downloaded_bytes") or 0
+                _emit_progress(progress_listener, total, total, status.get("speed") or 0)
+
         cookie_file = _prepare_cookiefile(cookies, url)
         ydl_opts = {
             "outtmpl": target_path,
@@ -907,6 +939,7 @@ def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_h
             "retries": 3,
             "fragment_retries": 3,
             "http_headers": http_headers,
+            "progress_hooks": [_progress_hook] if progress_listener is not None else [],
             "extractor_args": {
                 "youtube": {
                     "player_client": ["android", "ios", "mweb", "web"],
@@ -940,7 +973,7 @@ def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_h
         pass
     return False
 
-def _download_with_gallery_dl(url, target_path, referer, user_agent, cookies, extra_headers):
+def _download_with_gallery_dl(url, target_path, referer, user_agent, cookies, extra_headers, progress_listener=None):
     """Downloads media via gallery-dl job runner or gallery-dl network session."""
     if not GALLERY_DL_AVAILABLE:
         return False
@@ -971,6 +1004,8 @@ def _download_with_gallery_dl(url, target_path, referer, user_agent, cookies, ex
                 job = gdl_job.DownloadJob(ext)
                 job.run()
                 if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+                    size = os.path.getsize(target_path)
+                    _emit_progress(progress_listener, size, size, 0)
                     return True
 
             from gallery_dl import net
@@ -989,10 +1024,32 @@ def _download_with_gallery_dl(url, target_path, referer, user_agent, cookies, ex
                 content_type = (resp.headers.get("content-type") or "").lower()
                 if "text/html" in content_type or "application/json" in content_type:
                     return False
+                try:
+                    total_bytes = int(resp.headers.get("content-length") or 0)
+                except Exception:
+                    total_bytes = 0
+                downloaded = 0
+                last_emit_time = time.monotonic()
+                bytes_since_emit = 0
+                ema_speed = 0.0
                 with open(target_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=65536):
                         if chunk:
                             f.write(chunk)
+                            chunk_len = len(chunk)
+                            downloaded += chunk_len
+                            bytes_since_emit += chunk_len
+                            if progress_listener is not None:
+                                now = time.monotonic()
+                                elapsed = now - last_emit_time
+                                if elapsed >= 0.25:
+                                    instant_bps = bytes_since_emit / max(elapsed, 0.001)
+                                    ema_speed = instant_bps if ema_speed <= 0 else (ema_speed * 0.7 + instant_bps * 0.3)
+                                    _emit_progress(progress_listener, downloaded, total_bytes, int(ema_speed))
+                                    last_emit_time = now
+                                    bytes_since_emit = 0
+                if progress_listener is not None and downloaded > 0:
+                    _emit_progress(progress_listener, downloaded, total_bytes or downloaded, int(ema_speed))
                 if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
                     with open(target_path, "rb") as f:
                         head = f.read(512).lower()
@@ -1004,7 +1061,7 @@ def _download_with_gallery_dl(url, target_path, referer, user_agent, cookies, ex
         pass
     return False
 
-def download_media_file(media_url, target_path, referer=None, user_agent=None, cookies=None, headers_json=None):
+def download_media_file(media_url, target_path, referer=None, user_agent=None, cookies=None, headers_json=None, progress_listener=None):
     """
     Downloads media file using yt-dlp (primary) and gallery-dl (secondary fallback).
     Ditches all other engines/workflows.
@@ -1027,19 +1084,19 @@ def download_media_file(media_url, target_path, referer=None, user_agent=None, c
 
     # 1. Primary: yt-dlp
     if is_ytdlp_supported(media_url) or (referer and is_ytdlp_supported(referer)):
-        if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers):
+        if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers, progress_listener):
             return True
 
     # 2. Secondary fallback: gallery-dl
     if is_gallery_dl_supported(media_url) or (referer and is_gallery_dl_supported(referer)):
-        if _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers):
+        if _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers, progress_listener):
             return True
 
     # 3. Fallback: try yt-dlp then gallery-dl if not caught by heuristics
-    if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers):
+    if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers, progress_listener):
         return True
 
-    if _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers):
+    if _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers, progress_listener):
         return True
 
     return False

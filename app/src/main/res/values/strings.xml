@@ -2,4 +2,16 @@
 <resources>
     <string name="app_name">Emre Gallery</string>
     <string name="welcome_tap_to_continue">Tap to continue</string>
+    <string name="incoming_link_sheet_title">Link received</string>
+    <string name="incoming_link_save_pocket">Save to Pocket</string>
+    <string name="incoming_link_save_pocket_subtitle">Bookmark link and fetch metadata</string>
+    <string name="incoming_link_extract_download">Extract &amp; Download</string>
+    <string name="incoming_link_extract_download_subtitle">Detect videos, images, and audio on this link</string>
+    <string name="incoming_link_open_browser">Open in Browser</string>
+    <string name="incoming_link_open_browser_subtitle">Load in built-in browser with live sniffing</string>
+    <string name="incoming_link_extracting">Extracting downloadable media…</string>
+    <string name="incoming_link_no_media">No direct media found. Try opening in Browser.</string>
+    <string name="incoming_link_view_discovered">View %1$d discovered items</string>
+    <string name="incoming_link_download_now">Download media</string>
+    <string name="incoming_link_dismiss">Dismiss</string>
 </resources>

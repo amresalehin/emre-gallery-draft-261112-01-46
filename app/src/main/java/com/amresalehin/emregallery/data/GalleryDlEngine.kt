@@ -53,6 +53,10 @@ data class GalleryDlExtractResult(
     val errorMessage: String? = null
 )
 
+fun interface PythonDownloadProgressListener {
+    fun onProgress(bytesRead: Long, totalBytes: Long, speedBytesPerSec: Long)
+}
+
 /**
  * Gallery-dl and yt-dlp integration service powered by Chaquopy Python SDK on Android.
  * yt-dlp is the primary engine; gallery-dl serves as secondary for galleries and image hosts.
@@ -394,7 +398,8 @@ object GalleryDlEngine {
         referer: String? = null,
         headers: Map<String, String>? = null,
         cookies: String? = null,
-        domain: String? = null
+        domain: String? = null,
+        onProgress: ((progressRatio: Float, bytesRead: Long, totalBytes: Long, speedBytesPerSec: Long) -> Unit)? = null
     ): File? = withContext(Dispatchers.IO) {
         try {
             val effectiveDomain = domain?.replace(Regex("[^a-zA-Z0-9.-]"), "_")?.trim()?.takeIf { it.isNotBlank() }
@@ -434,7 +439,8 @@ object GalleryDlEngine {
                     userAgent = userAgent,
                     cookies = effectiveCookies ?: "",
                     headers = headers ?: emptyMap(),
-                    domain = effectiveDomain
+                    domain = effectiveDomain,
+                    onProgress = onProgress
                 )
                 if (nativeAttempt.handled) {
                     return@withContext nativeAttempt.file
@@ -444,6 +450,16 @@ object GalleryDlEngine {
             if (isAvailable()) {
                 val py = Python.getInstance()
                 val runner = py.getModule("gallery_dl_runner")
+                val pyListener = if (onProgress != null) {
+                    PythonDownloadProgressListener { bytesRead, totalBytes, speedBps ->
+                        val ratio = if (totalBytes > 0L) {
+                            (bytesRead.toFloat() / totalBytes.toFloat()).coerceIn(0.15f, 0.95f)
+                        } else {
+                            0.5f
+                        }
+                        onProgress.invoke(ratio, bytesRead, totalBytes, speedBps)
+                    }
+                } else null
                 val success = runner.callAttr(
                     "download_media_file",
                     mediaUrl,
@@ -451,7 +467,8 @@ object GalleryDlEngine {
                     referer ?: "",
                     userAgent,
                     effectiveCookies ?: "",
-                    headersJson
+                    headersJson,
+                    pyListener
                 ).toBoolean()
 
                 if (success && targetFile.exists() && targetFile.length() > 0L) {
@@ -492,7 +509,8 @@ object GalleryDlEngine {
         userAgent: String,
         cookies: String,
         headers: Map<String, String>,
-        domain: String
+        domain: String,
+        onProgress: ((progressRatio: Float, bytesRead: Long, totalBytes: Long, speedBytesPerSec: Long) -> Unit)? = null
     ): NativeYtDlpAttempt = withContext(Dispatchers.IO) {
         var tempDir: File? = null
         var resolverSucceeded = false
@@ -533,7 +551,13 @@ object GalleryDlEngine {
                 return result
             }
 
-            suspend fun downloadPart(spec: JSONObject, role: String, directory: File): File? {
+            suspend fun downloadPart(
+                spec: JSONObject,
+                role: String,
+                directory: File,
+                minRatio: Float,
+                maxRatio: Float
+            ): File? {
                 val url = spec.optString("url", "")
                 if (url.isBlank()) return null
                 val rawExt = spec.optString("ext", "bin").lowercase()
@@ -545,7 +569,12 @@ object GalleryDlEngine {
                     referer = resolved.optString("pageUrl").takeIf { it.isNotBlank() } ?: referer,
                     headers = streamHeaders(spec),
                     domain = domain,
-                    targetDirectory = directory
+                    targetDirectory = directory,
+                    onProgressWithSpeed = { bytesRead, totalBytes, speedBps ->
+                        val span = (maxRatio - minRatio).coerceAtLeast(0.05f)
+                        val frac = if (totalBytes > 0L) (bytesRead.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f) else 0.5f
+                        onProgress?.invoke(minRatio + span * frac, bytesRead, totalBytes, speedBps)
+                    }
                 )
                 return result.file?.takeIf { result.isSuccessful && it.isFile && it.length() > 0L }
             }
@@ -566,10 +595,12 @@ object GalleryDlEngine {
                     return@withContext NativeYtDlpAttempt(true, null)
                 }
 
-                val videoFile = downloadPart(videoSpec, "video", tempDir!!)
+                val videoFile = downloadPart(videoSpec, "video", tempDir!!, 0.15f, 0.65f)
                     ?: return@withContext NativeYtDlpAttempt(true, null)
-                val audioFile = downloadPart(audioSpec, "audio", tempDir!!)
+                val audioFile = downloadPart(audioSpec, "audio", tempDir!!, 0.65f, 0.85f)
                     ?: return@withContext NativeYtDlpAttempt(true, null)
+
+                onProgress?.invoke(0.90f, videoFile.length() + audioFile.length(), videoFile.length() + audioFile.length(), 0L)
 
                 val finalFile = File(outputDirectory, "${System.currentTimeMillis()}_${baseName}.mp4")
                 val stagingDirectory = File(outputDirectory, ".ffmpeg-staging")
@@ -619,6 +650,7 @@ object GalleryDlEngine {
                 val isManifest = streamUrl.contains(".m3u8", ignoreCase = true) ||
                     streamUrl.contains(".mpd", ignoreCase = true)
                 if (isManifest) {
+                    onProgress?.invoke(0.45f, 0L, 0L, 0L)
                     val finalFile = File(outputDirectory, "${System.currentTimeMillis()}_${baseName}.mp4")
                     val remux = FfmpegKitEngine.remuxStream(
                         streamUrl = streamUrl,
@@ -645,7 +677,11 @@ object GalleryDlEngine {
                     fileName = outputName,
                     referer = resolved.optString("pageUrl").takeIf { it.isNotBlank() } ?: referer,
                     headers = streamHeaders(formatSpec),
-                    domain = domain
+                    domain = domain,
+                    onProgressWithSpeed = { bytesRead, totalBytes, speedBps ->
+                        val ratio = if (totalBytes > 0L) (bytesRead.toFloat() / totalBytes.toFloat()).coerceIn(0.15f, 0.95f) else 0.5f
+                        onProgress?.invoke(ratio, bytesRead, totalBytes, speedBps)
+                    }
                 )
                 val downloaded = directResult.file
                 if (!directResult.isSuccessful || downloaded == null || !downloaded.isFile || downloaded.length() <= 0L) {

@@ -55,15 +55,18 @@ import com.amresalehin.emregallery.data.MediaCaptureEngine
 import com.amresalehin.emregallery.data.MediaCategory
 import com.amresalehin.emregallery.data.MediaClassifier
 import com.amresalehin.emregallery.data.MediaProvenance
+import com.amresalehin.emregallery.data.OkHttpDownloader
 import com.amresalehin.emregallery.data.PocketDeepScanEngine
 import com.amresalehin.emregallery.data.PreferencesRepository
 import com.amresalehin.emregallery.data.ScrapedMediaItem
 import android.webkit.URLUtil
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.URL
+import java.util.concurrent.atomic.AtomicReference
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -117,6 +120,10 @@ fun DirectBrowserView(
     var deepScanJob by remember { mutableStateOf<Job?>(null) }
 
     var currentUrl by remember { mutableStateOf(startUrl) }
+    val currentPageUrlRef = remember { AtomicReference(startUrl) }
+    LaunchedEffect(currentUrl) {
+        currentPageUrlRef.set(currentUrl)
+    }
     val totalDetectedCount = remember(currentUrl, tabDetectedCount, sessionDiscoveredItems.size) {
         if (currentUrl.isBlank() || currentUrl == "about:blank") 0
         else maxOf(tabDetectedCount, sessionDiscoveredItems.size)
@@ -230,6 +237,7 @@ fun DirectBrowserView(
 
     fun returnToBrowserHome() {
         currentUrl = ""
+        currentPageUrlRef.set("")
         addressInput = ""
         pageTitle = ""
         canGoBack = false
@@ -357,8 +365,24 @@ fun DirectBrowserView(
             maxScanDurationMs = 30_000L,
             scope = coroutineScope,
             onIncrementalMediaDiscovered = { newItems ->
+                val domain = runCatching { URL(current).host }.getOrDefault("")
+                val defaultHeaders = buildMap {
+                    put("Referer", current)
+                    put("User-Agent", OkHttpDownloader.DEFAULT_USER_AGENT)
+                    val cookieStr = OkHttpDownloader.sharedCookieJar.getCookieString(current)
+                    if (cookieStr.isNotBlank()) put("Cookie", cookieStr)
+                }
                 val scraped = newItems.map { item ->
-                    ScrapedMediaItem(
+                    val built = MediaCaptureEngine.buildMediaItem(
+                        rawUrl = item.sourceUrl,
+                        source = ExtractionSource.DOM_SCRAPE,
+                        baseUrl = current,
+                        poster = item.thumbnailUrl.ifBlank { null },
+                        titleHint = item.title.ifBlank { pageTitle },
+                        customId = item.id.ifBlank { null }
+                    )
+                    val resolvedClassification = MediaClassifier.classify(item.sourceUrl)
+                    (built ?: ScrapedMediaItem(
                         id = item.id.ifBlank { "deep_${item.sourceUrl.hashCode()}" },
                         url = item.sourceUrl,
                         title = item.title.ifBlank { pageTitle },
@@ -366,11 +390,20 @@ fun DirectBrowserView(
                         isVideo = item.isVideo || item.isStream,
                         isAudio = item.isAudio,
                         isStream = item.isStream,
-                        sizeBytes = item.sizeBytes
+                        category = resolvedClassification.category,
+                        format = item.format.ifBlank { resolvedClassification.format },
+                        thumbnailUrl = item.thumbnailUrl.ifBlank { null },
+                        mimeType = resolvedClassification.mimeType,
+                        downloadHeaders = defaultHeaders
+                    )).copy(
+                        sizeBytes = maxOf(built?.sizeBytes ?: 0L, item.sizeBytes),
+                        downloadHeaders = built?.downloadHeaders?.takeIf { it.isNotEmpty() } ?: defaultHeaders,
+                        format = item.format.ifBlank { built?.format ?: resolvedClassification.format },
+                        thumbnailUrl = item.thumbnailUrl.ifBlank { built?.thumbnailUrl ?: "" }.ifBlank { null },
+                        provenance = MediaProvenance(extractorEngine = "PocketDeepScan", pageUrl = current)
                     )
                 }
                 tabSession.registerMediaBatch(scraped, pageTitle)
-                val domain = runCatching { URL(current).host }.getOrDefault("")
                 onBatchExtracted(scraped, pageTitle, domain)
                 DownloaderSession.addDiscoveredItems(scraped, pageTitle)
             },
@@ -473,6 +506,7 @@ fun DirectBrowserView(
         DownloaderSession.clear()
         addressInput = formatted
         currentUrl = formatted
+        currentPageUrlRef.set(formatted)
         onUrlChange?.invoke(formatted)
         tabSession.updateNavigation(formatted, pageTitle)
         DownloaderSession.updateBrowserPage(formatted)
@@ -917,6 +951,7 @@ fun DirectBrowserView(
                                     isLoading = true
                                     BotDetectionMitigator.injectStealth(view)
                                     currentUrl = url
+                                    currentPageUrlRef.set(url)
                                     addressInput = url
                                     onUrlChange?.invoke(url)
                                     tabSession.updateNavigation(url, pageTitle)
@@ -974,12 +1009,28 @@ fun DirectBrowserView(
                                     val reqUrl = request?.url?.toString() ?: return null
                                     if (reqUrl.startsWith("about:")) return null
 
-                                    // Ad & tracker blocking for lightweight, high-performance browsing
-                                    if (AdBlockEngine.isAdOrTracker(reqUrl)) {
-                                        return AdBlockEngine.createEmptyResponse()
+                                    // Do not sniff top-level HTML page navigations as downloadable media
+                                    if (request.isForMainFrame) {
+                                        return if (AdBlockEngine.isAdOrTracker(reqUrl)) {
+                                            AdBlockEngine.createEmptyResponse()
+                                        } else {
+                                            null
+                                        }
                                     }
 
-                                    return null
+                                    val activeBaseUrl = currentPageUrlRef.get()
+                                        .takeIf { it.isNotBlank() && !it.equals("about:blank", ignoreCase = true) }
+                                        ?: reqUrl
+
+                                    return MediaCaptureEngine.shouldInterceptRequest(
+                                        request = request,
+                                        baseUrl = activeBaseUrl
+                                    ) { item ->
+                                        coroutineScope.launch(Dispatchers.Main) {
+                                            tabSession.registerMedia(item)
+                                            onMediaExtracted(item)
+                                        }
+                                    }
                                 }
 
                                 override fun onRenderProcessGone(

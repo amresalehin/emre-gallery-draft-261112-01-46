@@ -87,6 +87,7 @@ object MediaCaptureEngine {
                     }
 
                     // Direct src & data-lazy attributes
+                    var candidateUrls = [];
                     var rawSrc = img.src || img.getAttribute('src');
                     var dataSrc = img.getAttribute('data-src') || img.getAttribute('data-original') ||
                                   img.getAttribute('data-lazy-src') || img.getAttribute('data-large-file') ||
