@@ -71,6 +71,56 @@ object MediaNormalizer {
     }
 
     /**
+     * Removes candidates that Pocket has already discovered or that are already represented
+     * by an active/completed download. Bookmark records are authoritative even when they do
+     * not have a localUri yet: discovery must not queue the same media a second time.
+     *
+     * FAILED activity records do not independently block candidates that are not already
+     * retained in Pocket, preserving retry eligibility for those items.
+     */
+    fun filterNewQueueCandidates(
+        candidates: List<ScrapedMediaItem>,
+        existingBookmarkItems: List<MediaInboxItem>,
+        downloadActivities: List<DownloadActivityItem>
+    ): List<ScrapedMediaItem> {
+        val protectedKeys = HashSet<String>()
+
+        fun protect(url: String?) {
+            if (url.isNullOrBlank()) return
+            val key = canonicalKey(url)
+            if (key.isNotBlank()) protectedKeys.add(key)
+        }
+
+        // Include every previously discovered Pocket item, not only items that have been
+        // downloaded. Use the local URI only when no source URL was retained.
+        existingBookmarkItems.forEach { item ->
+            protect(item.sourceUrl)
+            if (item.sourceUrl.isBlank()) protect(item.localUri)
+        }
+
+        // A queued download is recorded as DOWNLOADING. Also protect retries, paused jobs,
+        // and completed downloads; leave FAILED entries retryable.
+        val protectedStatuses = setOf(
+            DownloadActivityStatus.DOWNLOADING,
+            DownloadActivityStatus.RETRYING,
+            DownloadActivityStatus.PAUSED,
+            DownloadActivityStatus.FINISHED
+        )
+        downloadActivities.asSequence()
+            .filter { it.status in protectedStatuses }
+            .forEach { activity ->
+                protect(activity.mediaUrl)
+                if (activity.mediaUrl.isBlank()) protect(activity.localUri)
+            }
+
+        // Deduplicate within this discovery batch, then exclude anything already known by
+        // Pocket or the download tracker using the same canonical identity function.
+        return deduplicate(candidates).filter { candidate ->
+            candidate.url.isNotBlank() && canonicalKey(candidate.url) !in protectedKeys
+        }
+    }
+
+    /**
      * Compares quality between two candidates. Returns > 0 if candidate a is higher quality.
      */
     fun compareQuality(a: ScrapedMediaItem, b: ScrapedMediaItem): Int {

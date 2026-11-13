@@ -764,23 +764,11 @@ class PocketRepository(
                 )
 
                 DownloadActivityManager.initialize(context)
-                val protectedKeys = latest.items
-                    .filter { it.localUri.isNotBlank() }
-                    .map { MediaClassifier.deduplicationKey(it.sourceUrl) }
-                    .toMutableSet()
-                DownloadActivityManager.activities.value
-                    .filter {
-                        it.status == DownloadActivityStatus.DOWNLOADING ||
-                        it.status == DownloadActivityStatus.RETRYING ||
-                        it.status == DownloadActivityStatus.PAUSED ||
-                        it.status == DownloadActivityStatus.FINISHED
-                    }
-                    .forEach { activity ->
-                        protectedKeys.add(MediaClassifier.deduplicationKey(activity.mediaUrl))
-                    }
-
-                val queueItems = MediaClassifier.deduplicateScrapedItems(discovery.items)
-                    .filter { MediaClassifier.deduplicationKey(it.url) !in protectedKeys }
+                val queueItems = MediaNormalizer.filterNewQueueCandidates(
+                    candidates = discovery.items,
+                    existingBookmarkItems = latest.items,
+                    downloadActivities = DownloadActivityManager.activities.value
+                )
                 if (queueItems.isNotEmpty()) {
                     DownloadQueueManager.enqueueBatch(
                         context = context,
