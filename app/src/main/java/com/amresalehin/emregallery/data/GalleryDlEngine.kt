@@ -572,7 +572,10 @@ object GalleryDlEngine {
                     ?: return@withContext NativeYtDlpAttempt(true, null)
 
                 val finalFile = File(outputDirectory, "${System.currentTimeMillis()}_${baseName}.mp4")
-                val temporaryOutput = File(outputDirectory, "${finalFile.nameWithoutExtension}.part.mp4")
+                val stagingDirectory = File(outputDirectory, ".ffmpeg-staging")
+                if (!stagingDirectory.exists()) stagingDirectory.mkdirs()
+                val temporaryOutputDirectory = if (stagingDirectory.isDirectory) stagingDirectory else tempDir!!
+                val temporaryOutput = File(temporaryOutputDirectory, ".${finalFile.nameWithoutExtension}-${System.nanoTime()}.part.mp4")
                 temporaryOutput.delete()
                 val muxed = FfmpegKitEngine.muxAudioAndVideo(
                     videoFile = videoFile,
@@ -583,9 +586,23 @@ object GalleryDlEngine {
                     temporaryOutput.delete()
                     return@withContext NativeYtDlpAttempt(true, null)
                 }
-                if (!temporaryOutput.renameTo(finalFile)) {
-                    temporaryOutput.copyTo(finalFile, overwrite = true)
+                val publishTemp = File(outputDirectory, ".${finalFile.name}.${System.nanoTime()}.publishing")
+                val published = if (temporaryOutput.renameTo(finalFile)) {
+                    true
+                } else {
+                    runCatching {
+                        temporaryOutput.copyTo(publishTemp, overwrite = true)
+                        publishTemp.isFile && publishTemp.length() == temporaryOutput.length() && publishTemp.renameTo(finalFile)
+                    }.getOrDefault(false).also {
+                        publishTemp.delete()
+                        if (it) temporaryOutput.delete()
+                    }
+                }
+                if (!published) {
                     temporaryOutput.delete()
+                    publishTemp.delete()
+                    finalFile.delete()
+                    return@withContext NativeYtDlpAttempt(true, null)
                 }
                 android.media.MediaScannerConnection.scanFile(
                     context, arrayOf(finalFile.absolutePath), arrayOf("video/mp4"), null

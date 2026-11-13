@@ -516,7 +516,11 @@ object FfmpegKitEngine {
                     ": " + value.replace("\\r", "").replace("\\n", "").replace("\"", "")
             }
         val headerArg = if (headerLines.isBlank()) "" else "-headers \"${headerLines}\\r\\n\" "
-        val tempFile = File(outputFile.parentFile ?: outputFile.absoluteFile.parentFile, outputFile.nameWithoutExtension + ".part.mp4")
+        val outputDirectory = outputFile.parentFile ?: outputFile.absoluteFile.parentFile
+        val stagingDirectory = File(outputDirectory, ".ffmpeg-staging")
+        if (!stagingDirectory.exists()) stagingDirectory.mkdirs()
+        val tempDirectory = stagingDirectory.takeIf { it.isDirectory } ?: outputDirectory
+        val tempFile = File(tempDirectory, ".${outputFile.nameWithoutExtension}-${System.nanoTime()}.part.mp4")
         tempFile.delete()
 
         val inputArg = headerArg + "-i ${quote(streamUrl)}"
@@ -542,10 +546,24 @@ object FfmpegKitEngine {
             outputFile.delete()
             result.copy(isSuccess = false, outputFile = null)
         } else {
+            val publishTemp = File(outputDirectory, ".${outputFile.name}.${System.nanoTime()}.publishing")
             outputFile.delete()
-            if (!tempFile.renameTo(outputFile)) {
-                tempFile.copyTo(outputFile, overwrite = true)
+            val published = if (tempFile.renameTo(outputFile)) {
+                true
+            } else {
+                runCatching {
+                    tempFile.copyTo(publishTemp, overwrite = true)
+                    publishTemp.isFile && publishTemp.length() == tempFile.length() && publishTemp.renameTo(outputFile)
+                }.getOrDefault(false).also {
+                    publishTemp.delete()
+                    if (it) tempFile.delete()
+                }
+            }
+            if (!published) {
                 tempFile.delete()
+                publishTemp.delete()
+                outputFile.delete()
+                return@withContext result.copy(isSuccess = false, outputFile = null)
             }
             context?.let { ctx ->
                 android.media.MediaScannerConnection.scanFile(ctx, arrayOf(outputFile.absolutePath), arrayOf("video/mp4"), null)

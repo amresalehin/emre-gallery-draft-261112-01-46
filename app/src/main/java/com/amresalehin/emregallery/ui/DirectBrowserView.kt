@@ -551,7 +551,8 @@ fun DirectBrowserView(
                         // Collect all already fetched / discovered media from the active browser session
                         val currentDetected = tabSession.getDetectedMedia()
                         val currentDiscovered = DownloaderSession.discoveredItems.value
-                        val allScraped = (currentDetected + currentDiscovered).distinctBy { it.url }
+                        val allScraped = com.amresalehin.emregallery.data.MediaClassifier
+                            .deduplicateScrapedItems(currentDetected + currentDiscovered)
                         val alreadyFetchedMediaItems = allScraped.map { scraped ->
                             com.amresalehin.emregallery.data.MediaInboxItem(
                                 id = scraped.id.ifBlank { "media_${scraped.url.hashCode().toUInt().toString(16)}" },

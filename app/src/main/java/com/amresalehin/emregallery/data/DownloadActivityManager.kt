@@ -13,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -77,6 +78,7 @@ object DownloadActivityManager {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val activeRetryJobs = ConcurrentHashMap<String, Job>()
+    private var pocketBookmarksObserver: Job? = null
 
     fun initialize(context: Context) {
         if (appContext == null) {
@@ -108,6 +110,7 @@ object DownloadActivityManager {
             syncWithStorageDir(context)
             persistActivities()
             syncWithInboxRepository()
+            observePocketBookmarks(context.applicationContext)
             resumePersistedRetries(context.applicationContext)
         }
     }
@@ -242,6 +245,28 @@ object DownloadActivityManager {
         }
     }
 
+    private fun observePocketBookmarks(context: Context) {
+        if (pocketBookmarksObserver?.isActive == true) return
+        pocketBookmarksObserver = scope.launch {
+            PocketRepository.getInstance(context.applicationContext).bookmarks.collect {
+                syncWithInboxRepository()
+            }
+        }
+    }
+
+    private fun resolvePocketMediaSize(context: Context, localUri: String, fallbackSize: Long): Long? {
+        if (localUri.isBlank()) return null
+        val parsed = runCatching { Uri.parse(localUri) }.getOrNull()
+        if (parsed?.scheme.equals("content", ignoreCase = true)) {
+            val descriptorSize = runCatching {
+                context.contentResolver.openFileDescriptor(parsed!!, "r")?.use { it.statSize }
+            }.getOrNull() ?: return null
+            return descriptorSize.takeIf { it > 0L } ?: fallbackSize.takeIf { it > 0L }
+        }
+        val file = if (parsed?.scheme.equals("file", ignoreCase = true)) parsed?.path?.let(::File) else File(localUri)
+        return file?.takeIf { it.isFile && it.length() > 0L }?.length()
+    }
+
     /**
      * Synchronizes and merges finished items from the real MediaInboxRepository and PocketRepository.
      */
@@ -293,43 +318,40 @@ object DownloadActivityManager {
             val pocketBookmarks = pocketRepo.bookmarks.value
             for (stack in pocketBookmarks) {
                 for (item in stack.items) {
-                    if (item.localUri.isNotBlank()) {
-                        val localPath = item.localUri.removePrefix("file://")
-                        val file = File(localPath)
-                        if (file.exists() && file.length() > 0L) {
-                            val candidateId = item.id.ifBlank { "pocket_${stack.id}_${item.localUri.hashCode()}" }
-                            val uniqueId = if (seenIds.add(candidateId)) {
-                                candidateId
-                            } else {
-                                val fallback = "pocket_${stack.id}_${candidateId}_${item.localUri.hashCode()}"
-                                seenIds.add(fallback)
-                                fallback
-                            }
-
-                            finishedItems.add(
-                                DownloadActivityItem(
-                                    id = uniqueId,
-                                    title = item.title.ifBlank { stack.title.ifBlank { file.name } },
-                                    mediaUrl = item.sourceUrl.ifBlank { item.localUri },
-                                    thumbnailUrl = item.localUri,
-                                    localUri = item.localUri,
-                                    isVideo = item.isVideo,
-                                    isAudio = item.isAudio,
-                                    isStream = item.isStream,
-                                    format = item.format.ifBlank { if (item.isVideo) "MP4" else "JPG" },
-                                    status = DownloadActivityStatus.FINISHED,
-                                    progress = 1.0f,
-                                    bytesRead = file.length(),
-                                    totalBytes = file.length(),
-                                    timestampMillis = file.lastModified().takeIf { it > 0 } ?: stack.timestampMillis,
-                                    durationHint = if (item.isVideo) "HD" else null,
-                                    stackId = stack.id,
-                                    stackTitle = stack.title,
-                                    sourceDomain = stack.sourceDomain,
-                                    sourceUrl = stack.sourceUrl
-                                )
-                            )
+                    val cachedSize = resolvePocketMediaSize(ctx, item.localUri, item.sizeBytes)
+                    if (cachedSize != null) {
+                        val localName = Uri.parse(item.localUri).lastPathSegment?.takeIf { it.isNotBlank() } ?: "Media"
+                        val candidateId = item.id.ifBlank { "pocket_${stack.id}_${item.localUri.hashCode()}" }
+                        val uniqueId = if (seenIds.add(candidateId)) {
+                            candidateId
+                        } else {
+                            val fallback = "pocket_${stack.id}_${candidateId}_${item.localUri.hashCode()}"
+                            seenIds.add(fallback)
+                            fallback
                         }
+                        finishedItems.add(
+                            DownloadActivityItem(
+                                id = uniqueId,
+                                title = item.title.ifBlank { stack.title.ifBlank { localName } },
+                                mediaUrl = item.sourceUrl.ifBlank { item.localUri },
+                                thumbnailUrl = item.localUri,
+                                localUri = item.localUri,
+                                isVideo = item.isVideo,
+                                isAudio = item.isAudio,
+                                isStream = item.isStream,
+                                format = item.format.ifBlank { if (item.isVideo) "MP4" else "JPG" },
+                                status = DownloadActivityStatus.FINISHED,
+                                progress = 1.0f,
+                                bytesRead = cachedSize,
+                                totalBytes = cachedSize,
+                                timestampMillis = stack.timestampMillis,
+                                durationHint = if (item.isVideo) "HD" else null,
+                                stackId = stack.id,
+                                stackTitle = stack.title,
+                                sourceDomain = stack.sourceDomain,
+                                sourceUrl = stack.sourceUrl
+                            )
+                        )
                     }
                 }
             }
@@ -337,14 +359,25 @@ object DownloadActivityManager {
             Log.e(TAG, "Error syncing with pocket repository", e)
         }
 
-        val currentActivities = _activities.value
-        val existingFinished = currentActivities.filter { it.status == DownloadActivityStatus.FINISHED }
-        val activeOrFailed = currentActivities.filter { it.status != DownloadActivityStatus.FINISHED }
-        val activeIds = activeOrFailed.map { it.id }.toSet()
-        val allFinished = (existingFinished + finishedItems).filter { it.id !in activeIds }.distinctBy { it.id }
+        val completedById = finishedItems.associateBy { it.id }
+        val completedByUrl = finishedItems.filter { it.mediaUrl.isNotBlank() }.associateBy { it.mediaUrl }
+        val reconciledActivities = _activities.value.map { activity ->
+            val completed = completedById[activity.id] ?: completedByUrl[activity.mediaUrl]
+            if (completed != null && activity.status != DownloadActivityStatus.FINISHED) {
+                completed.copy(
+                    workId = activity.workId ?: completed.workId,
+                    retryCount = activity.retryCount,
+                    maxRetries = activity.maxRetries
+                )
+            } else activity
+        }
+        val activeOrFailed = reconciledActivities.filter { it.status != DownloadActivityStatus.FINISHED }
+        // Prefer Pocket/inbox metadata over generic storage history for an identical local file.
+        val allFinished = (finishedItems + reconciledActivities.filter { it.status == DownloadActivityStatus.FINISHED })
+            .distinctBy { it.localUri?.takeIf { uri -> uri.isNotBlank() } ?: it.id }
 
         // Combined ordered: downloading first, retrying second, paused third, failed fourth, then finished newest first
-        _activities.value = (activeOrFailed + allFinished).distinctBy { it.id }.sortedWith(
+        val sortedActivities = (activeOrFailed + allFinished).distinctBy { it.id }.sortedWith(
             compareBy<DownloadActivityItem> {
                 when (it.status) {
                     DownloadActivityStatus.DOWNLOADING -> 0
@@ -355,6 +388,10 @@ object DownloadActivityManager {
                 }
             }.thenByDescending { it.timestampMillis }
         )
+        if (sortedActivities != _activities.value) {
+            _activities.value = sortedActivities
+            persistActivities()
+        }
     }
 
     /**
@@ -367,7 +404,15 @@ object DownloadActivityManager {
             val storageDir = OkHttpDownloader.getTargetStorageDir(ctx)
             if (!storageDir.exists() || !storageDir.isDirectory) return
             val files = storageDir.walkTopDown()
-                .filter { it.isFile && it.length() > 0 && !it.name.endsWith(".download") && !it.name.endsWith(".downloading") && !it.name.endsWith(".tmp") && !it.name.endsWith(".meta") }
+                .onEnter { directory -> directory == storageDir || !directory.name.equals(".ffmpeg-staging", ignoreCase = true) }
+                .filter { file ->
+                    val name = file.name.lowercase(Locale.ROOT)
+                    file.isFile && file.length() > 0L && !name.startsWith(".") &&
+                        !name.endsWith(".download") && !name.endsWith(".downloading") &&
+                        !name.endsWith(".tmp") && !name.endsWith(".meta") &&
+                        !name.endsWith(".part") && !name.endsWith(".partial") &&
+                        !name.contains(".part.") && !name.endsWith(".publishing")
+                }
                 .toList()
 
             val current = _activities.value.toMutableList()

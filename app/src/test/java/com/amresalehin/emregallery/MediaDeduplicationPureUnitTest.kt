@@ -706,6 +706,58 @@ class MediaDeduplicationPureUnitTest {
     }
 
     @Test
+    fun separateYouTubeAudioTrackIsFoldedIntoVideoInEitherDiscoveryOrder() {
+        val pageUrl = "https://www.youtube.com/watch?v=abcdefghijk"
+        val video = ScrapedMediaItem(
+            id = "youtube_video",
+            url = "https://r1---sn.googlevideo.com/videoplayback?mime=video%2Fmp4&id=video-track",
+            title = "Example video",
+            isVideo = true,
+            provenance = MediaProvenance(pageUrl = pageUrl),
+            metadata = mapOf("source_url" to pageUrl)
+        )
+        val audio = ScrapedMediaItem(
+            id = "youtube_audio",
+            url = "https://r1---sn.googlevideo.com/videoplayback?mime=audio%2Fmp4&id=audio-track",
+            title = "Example video audio",
+            isAudio = true,
+            category = MediaCategory.AUDIO,
+            provenance = MediaProvenance(pageUrl = pageUrl),
+            metadata = mapOf("source_url" to pageUrl)
+        )
+        assertEquals(listOf("youtube_video"), MediaClassifier.deduplicateScrapedItems(listOf(audio, video)).map { it.id })
+        assertEquals(listOf("youtube_video"), MediaClassifier.deduplicateScrapedItems(listOf(video, audio)).map { it.id })
+    }
+
+    @Test
+    fun redditDashAudioTrackIsClassifiedAsAudioAndFoldedIntoVideo() {
+        val audioUrl = "https://v.redd.it/post123/DASH_AUDIO_128.mp4"
+        val videoUrl = "https://v.redd.it/post123/DASH_720.mp4"
+        val classification = MediaClassifier.classify(audioUrl, "video/mp4")
+        assertTrue(classification.isAudio)
+        assertFalse(classification.isVideo)
+        val audio = ScrapedMediaItem(id = "reddit_audio", url = audioUrl, title = "Reddit audio", isAudio = true, category = MediaCategory.AUDIO)
+        val video = ScrapedMediaItem(id = "reddit_video", url = videoUrl, title = "Reddit video", isVideo = true)
+        assertEquals(listOf("reddit_video"), MediaClassifier.deduplicateScrapedItems(listOf(audio, video)).map { it.id })
+        assertEquals(listOf("reddit_video"), MediaClassifier.deduplicateScrapedItems(listOf(video, audio)).map { it.id })
+    }
+
+    @Test
+    fun independentAudioOnSamePageIsNotFoldedIntoVideo() {
+        val pageUrl = "https://example.com/article"
+        val video = ScrapedMediaItem(
+            id = "article_video", url = "https://cdn.example.com/video.mp4", title = "Video",
+            isVideo = true, provenance = MediaProvenance(pageUrl = pageUrl)
+        )
+        val audio = ScrapedMediaItem(
+            id = "article_audio", url = "https://cdn.example.com/interview.mp3", title = "Interview audio",
+            isAudio = true, category = MediaCategory.AUDIO, provenance = MediaProvenance(pageUrl = pageUrl)
+        )
+        val result = MediaClassifier.deduplicateScrapedItems(listOf(video, audio))
+        assertEquals(setOf("article_video", "article_audio"), result.map { it.id }.toSet())
+    }
+
+    @Test
     fun testBotDetectionChallengeIdentification() {
         // Cloudflare / Turnstile challenges correctly identified
         assertTrue(com.amresalehin.emregallery.data.BotDetectionMitigator.isBotChallenge("Just a moment...", "https://example.com"))

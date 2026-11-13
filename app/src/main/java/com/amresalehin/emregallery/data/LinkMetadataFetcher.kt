@@ -60,7 +60,8 @@ object LinkMetadataFetcher {
             try {
                 val gdlRes = GalleryDlEngine.extractMedia(normalizedUrl)
                 if (gdlRes.success && gdlRes.items.isNotEmpty()) {
-                    val mediaItems = gdlRes.items.map { item ->
+                    val deduplicatedItems = MediaClassifier.deduplicateScrapedItems(gdlRes.items)
+                    val mediaItems = deduplicatedItems.map { item ->
                         MediaInboxItem(
                             id = "gdl_${item.id}",
                             title = item.title,
@@ -75,9 +76,9 @@ object LinkMetadataFetcher {
                         )
                     }
                     val preview = gdlRes.previewImageUrl.ifBlank {
-                        gdlRes.items.firstOrNull { !it.isVideo }?.url
-                            ?: gdlRes.items.firstOrNull()?.thumbnailUrl
-                            ?: gdlRes.items.firstOrNull()?.url
+                        deduplicatedItems.firstOrNull { !it.isVideo && !it.isAudio }?.url
+                            ?: deduplicatedItems.firstOrNull()?.thumbnailUrl
+                            ?: deduplicatedItems.firstOrNull()?.url
                             ?: highResSiteIcon
                     }
                     val cleanTitle = gdlRes.pageTitle.ifBlank { domain }

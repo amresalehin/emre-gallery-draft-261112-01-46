@@ -1103,6 +1103,38 @@ object MediaClassifier {
         return 0
     }
 
+    private fun youtubeSourceId(item: ScrapedMediaItem): String? {
+        val candidates = listOf(item.provenance.pageUrl, item.metadata["source_url"].orEmpty(), item.metadata["webpage_url"].orEmpty(), item.url)
+        return candidates.asSequence().mapNotNull { extractYouTubeVideoId(it) }.firstOrNull()
+    }
+
+    private fun mediaUri(url: String): URI? = runCatching { URI(url) }.getOrNull()
+
+    /**
+     * Returns true only for known platform-specific audio components of the supplied video.
+     * Generic audio on the same article/page is deliberately retained as independent media.
+     */
+    private fun isSeparateAudioCompanion(audio: ScrapedMediaItem, video: ScrapedMediaItem): Boolean {
+        if (!audio.isAudio || (!video.isVideo && !video.isStream)) return false
+        val audioUri = mediaUri(audio.url) ?: return false
+        val videoUri = mediaUri(video.url) ?: return false
+        val audioHost = audioUri.host?.lowercase(Locale.ROOT).orEmpty()
+        val videoHost = videoUri.host?.lowercase(Locale.ROOT).orEmpty()
+        if (audioHost.endsWith("googlevideo.com")) {
+            val audioId = youtubeSourceId(audio)
+            val videoId = youtubeSourceId(video)
+            if (audioId != null && audioId == videoId) return true
+        }
+        if (audioHost == "v.redd.it" && videoHost == "v.redd.it") {
+            val audioPath = audioUri.path.orEmpty()
+            val videoPath = videoUri.path.orEmpty()
+            val audioFile = audioPath.substringAfterLast('/')
+            val isDashAudio = audioFile.startsWith("DASH_AUDIO", ignoreCase = true) || audioFile.startsWith("DASH-AUDIO", ignoreCase = true)
+            if (isDashAudio && audioPath.substringBeforeLast('/') == videoPath.substringBeforeLast('/') && audioPath != videoPath) return true
+        }
+        return false
+    }
+
     /**
      * Merges incoming media items into a target map keyed by deduplicationKey.
      * Unified pipeline for deduplication, video-poster folding, quality upgrades,
@@ -1136,6 +1168,16 @@ object MediaClassifier {
 
         for (item in incoming) {
             val key = deduplicationKey(item.url)
+            if (item.isAudio && targetMap.values.any { isSeparateAudioCompanion(item, it) }) continue
+            if (item.isVideo || item.isStream) {
+                val pairedAudioKeys = targetMap.entries
+                    .filter { (_, existing) -> isSeparateAudioCompanion(existing, item) }
+                    .map { it.key }
+                if (pairedAudioKeys.isNotEmpty()) {
+                    pairedAudioKeys.forEach { targetMap.remove(it) }
+                    modified = true
+                }
+            }
 
             // Case A: Incoming item is a Video -> fold existing matching poster image into thumbnail
             if (item.isVideo) {
@@ -1283,6 +1325,12 @@ object MediaClassifier {
     fun classify(url: String, mimeHint: String? = null): ClassificationResult {
         val lower = url.lowercase(Locale.ROOT)
         val mimeLower = mimeHint?.lowercase(Locale.ROOT) ?: ""
+        val parsedUri = mediaUri(url)
+        val host = parsedUri?.host?.lowercase(Locale.ROOT).orEmpty()
+        val pathFileName = parsedUri?.path.orEmpty().substringAfterLast('/')
+        if (host == "v.redd.it" && (pathFileName.startsWith("DASH_AUDIO", ignoreCase = true) || pathFileName.startsWith("DASH-AUDIO", ignoreCase = true))) {
+            return ClassificationResult(category = MediaCategory.AUDIO, format = "M4A", mimeType = "audio/mp4", isVideo = false, isAudio = true, isStream = false)
+        }
 
         // 1. Streaming media (HLS & DASH)
         val cleanPath = lower.substringBefore("?").substringBefore("#")

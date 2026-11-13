@@ -10,6 +10,7 @@ import com.amresalehin.emregallery.data.MediaInboxStack
 import com.amresalehin.emregallery.data.OkHttpDownloader
 import com.amresalehin.emregallery.data.PocketRepository
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -127,6 +128,63 @@ class BookmarkDetailDownloadActivityTest {
         assertEquals(DownloadActivityStatus.FINISHED, syncedItem?.status)
         assertEquals("Diagram", syncedItem?.title)
         assertEquals(createdBookmark.id, syncedItem?.stackId)
+    }
+
+    @Test
+    fun pocketCacheUpdatePromotesMatchingQueuedActivityToFinished() {
+        val pocketRepo = PocketRepository.getInstance(context)
+        val stack = pocketRepo.addBookmark(
+            title = "Cached media bookmark",
+            url = "https://cache.example.com/post",
+            domain = "cache.example.com",
+            autoFetchMetadata = false
+        )
+        val itemId = "cached_bookmark_media"
+        val sourceUrl = "https://cache.example.com/media.jpg"
+        DownloadActivityManager.recordQueued(
+            id = itemId,
+            title = "Cached image",
+            mediaUrl = sourceUrl,
+            stackId = stack.id,
+            stackTitle = stack.title,
+            sourceUrl = stack.sourceUrl
+        )
+        val cachedFile = File(context.filesDir, "pocket_cached_media.jpg").apply { writeText("cached-media") }
+        val cachedUri = Uri.fromFile(cachedFile).toString()
+        pocketRepo.updateBookmark(
+            stack.copy(items = listOf(
+                MediaInboxItem(
+                    id = itemId, title = "Cached image", localUri = cachedUri, sourceUrl = sourceUrl,
+                    isVideo = false, format = "JPG", sizeBytes = cachedFile.length()
+                )
+            ))
+        )
+        DownloadActivityManager.syncWithInboxRepository()
+        val activity = DownloadActivityManager.activities.value.firstOrNull { it.id == itemId }
+        assertNotNull("Cached bookmark media must be reconciled into Activity", activity)
+        assertEquals(DownloadActivityStatus.FINISHED, activity?.status)
+        assertEquals(cachedUri, activity?.localUri)
+        assertEquals(cachedFile.length(), activity?.bytesRead)
+        cachedFile.delete()
+    }
+
+    @Test
+    fun syncWithStorageDirDoesNotExposeFfmpegIntermediateFiles() {
+        val baseStorageDir = OkHttpDownloader.getTargetStorageDir(context)
+        val suffix = System.currentTimeMillis()
+        val completeFile = File(baseStorageDir, "verified_stream_$suffix.mp4").apply { writeText("verified-final-video") }
+        val rootPartial = File(baseStorageDir, "unmerged_$suffix.part.mp4").apply { writeText("partial-video") }
+        val stagingDir = File(baseStorageDir, ".ffmpeg-staging").apply { mkdirs() }
+        val stagedPartial = File(stagingDir, "unmerged.part.mp4").apply { writeText("partial-video") }
+        DownloadActivityManager.syncWithStorageDir(context)
+        val activities = DownloadActivityManager.activities.value
+        assertTrue("A verified final video should be visible", activities.any { it.localUri == Uri.fromFile(completeFile).toString() })
+        assertFalse("A root .part.mp4 file must not be exposed", activities.any { it.localUri == Uri.fromFile(rootPartial).toString() })
+        assertFalse("A hidden FFmpeg staging file must not be exposed", activities.any { it.localUri == Uri.fromFile(stagedPartial).toString() })
+        completeFile.delete()
+        rootPartial.delete()
+        stagedPartial.delete()
+        stagingDir.delete()
     }
 
     @Test
