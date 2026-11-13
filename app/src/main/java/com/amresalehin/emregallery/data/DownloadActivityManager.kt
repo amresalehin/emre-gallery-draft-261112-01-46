@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -247,10 +249,29 @@ object DownloadActivityManager {
 
     private fun observePocketBookmarks(context: Context) {
         if (pocketBookmarksObserver?.isActive == true) return
-        pocketBookmarksObserver = scope.launch {
-            PocketRepository.getInstance(context.applicationContext).bookmarks.collect {
-                syncWithInboxRepository()
-            }
+        pocketBookmarksObserver = scope.launch(Dispatchers.IO) {
+            PocketRepository.getInstance(context.applicationContext).bookmarks
+                .map { stacks ->
+                    stacks.map { stack ->
+                        stack.id to (
+                            stack.title to stack.items
+                                .filter { it.localUri.isNotBlank() }
+                                .map { item ->
+                                    listOf(
+                                        item.id,
+                                        item.localUri,
+                                        item.title,
+                                        item.sourceUrl,
+                                        item.sizeBytes.toString()
+                                    )
+                                }
+                        )
+                    }
+                }
+                .distinctUntilChanged()
+                .collect {
+                    syncWithInboxRepository()
+                }
         }
     }
 
