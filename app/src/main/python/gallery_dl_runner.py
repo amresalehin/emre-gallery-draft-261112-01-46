@@ -665,32 +665,7 @@ def extract_yt_dlp(url, options_json="{}"):
                         "pageUrl": page_url
                     })
 
-                    # Also provide the best standalone audio track if formats are present
-                    audio_fmts = [f for f in formats if f.get("url") and f.get("vcodec") == "none" and f.get("acodec") != "none"]
-                    if audio_fmts and not is_audio_only:
-                        best_audio = audio_fmts[-1]
-                        a_url = best_audio.get("url")
-                        if a_url and a_url not in seen_urls:
-                            seen_urls.add(a_url)
-                            a_ext = best_audio.get("ext") or "m4a"
-                            a_title = f"{v_title}.{a_ext}" if not v_title.endswith(f".{a_ext}") else v_title
-                            a_hash = hashlib.sha256(a_url.encode('utf-8')).hexdigest()[:12]
-                            items.append({
-                                "id": f"ytdlp_audio_{len(items)}_{a_hash}",
-                                "url": a_url,
-                                "title": a_title,
-                                "category": "AUDIO",
-                                "format": a_ext.upper(),
-                                "mimeType": f"audio/{a_ext}",
-                                "isVideo": False,
-                                "isAudio": True,
-                                "isStream": False,
-                                "thumbnailUrl": thumb,
-                                "resolutionHint": None,
-                                "sizeBytes": best_audio.get("filesize") or best_audio.get("filesize_approx"),
-                                "source": "yt-dlp",
-                                "pageUrl": page_url
-                            })
+                    # Separate audio belongs to its video and is resolved/muxed at save time.
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -758,6 +733,145 @@ def extract_media(url, options_json="{}"):
         "error": f"URL is not supported by yt-dlp or gallery-dl: {clean_url}",
         "items": []
     })
+
+
+def resolve_ytdlp_formats(url, referer="", user_agent=None, cookies=None, headers_json="{}"):
+    """Resolve yt-dlp formats without invoking an external FFmpeg executable."""
+    clean_url = (url or "").strip()
+    clean_referer = (referer or "").strip()
+    if not YTDLP_AVAILABLE:
+        return json.dumps({"success": False, "error": "yt-dlp is unavailable"})
+    target_url = clean_referer if is_ytdlp_supported(clean_referer) else clean_url
+    if not target_url or not is_ytdlp_supported(target_url):
+        return json.dumps({"success": False, "error": "No yt-dlp-supported source URL"})
+    try:
+        extra_headers = json.loads(headers_json) if headers_json else {}
+        if not isinstance(extra_headers, dict):
+            extra_headers = {}
+    except Exception:
+        extra_headers = {}
+    ua = user_agent or "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36"
+    request_headers = {"User-Agent": ua, "Accept": "*/*", "Accept-Language": "en-US,en;q=0.9"}
+    if clean_referer:
+        request_headers["Referer"] = clean_referer
+    if cookies:
+        request_headers["Cookie"] = cookies
+    request_headers.update(extra_headers)
+    cookie_file = _prepare_cookiefile(cookies, target_url)
+    options = {
+        "quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
+        "format": "bestvideo+bestaudio/best", "socket_timeout": 35, "geo_bypass": True,
+        "nocheckcertificate": True, "retries": 3, "fragment_retries": 3,
+        "http_headers": request_headers,
+        "extractor_args": {
+            "youtube": {"player_client": ["android", "ios", "mweb", "web"], "player_skip": ["webpage", "configs"]},
+            "instagram": {"api": ["graphql", "web"]},
+            "tiktok": {"api": ["app", "web"]},
+            "twitter": {"api": ["syndication", "graphql"]}
+        }
+    }
+    if cookie_file:
+        options["cookiefile"] = cookie_file
+
+    def has_video(fmt):
+        return bool(fmt.get("url")) and fmt.get("vcodec") not in (None, "none")
+
+    def has_audio(fmt):
+        return bool(fmt.get("url")) and fmt.get("acodec") not in (None, "none")
+
+    def video_rank(fmt):
+        return (int(fmt.get("height") or 0), int(fmt.get("width") or 0),
+                float(fmt.get("tbr") or 0), int(fmt.get("filesize") or fmt.get("filesize_approx") or 0))
+
+    def audio_rank(fmt):
+        return (float(fmt.get("abr") or 0), float(fmt.get("tbr") or 0),
+                int(fmt.get("filesize") or fmt.get("filesize_approx") or 0))
+
+    def payload(fmt):
+        stream_headers = dict(request_headers)
+        if isinstance(fmt.get("http_headers"), dict):
+            stream_headers.update(fmt["http_headers"])
+        return {
+            "url": fmt.get("url") or "", "ext": fmt.get("ext") or "bin",
+            "formatId": str(fmt.get("format_id") or ""),
+            "videoCodec": str(fmt.get("vcodec") or ""),
+            "audioCodec": str(fmt.get("acodec") or ""),
+            "headers": stream_headers
+        }
+
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(target_url, download=False)
+            if not info:
+                return json.dumps({"success": False, "error": "yt-dlp returned no media information"})
+            entries = info.get("entries") or [info]
+            valid_entries = [value for value in entries if isinstance(value, dict)]
+            matching_entries = []
+            for candidate in valid_entries:
+                candidate_urls = {candidate.get("url")}
+                candidate_urls.update(
+                    fmt.get("url") for fmt in (candidate.get("formats") or [])
+                    if isinstance(fmt, dict)
+                )
+                if clean_url in candidate_urls:
+                    matching_entries.append(candidate)
+            if matching_entries:
+                entry = matching_entries[0]
+            elif len(valid_entries) == 1:
+                entry = valid_entries[0]
+            else:
+                return json.dumps({
+                    "success": False,
+                    "error": "Could not uniquely match the selected media item to a playlist entry"
+                })
+            if not entry:
+                return json.dumps({"success": False, "error": "yt-dlp returned no playable entry"})
+            formats = [fmt for fmt in (entry.get("formats") or []) if isinstance(fmt, dict) and fmt.get("url")]
+            muxed = [fmt for fmt in formats if has_video(fmt) and has_audio(fmt)]
+            video_only = [fmt for fmt in formats if has_video(fmt) and not has_audio(fmt)]
+            audio_only = [fmt for fmt in formats if has_audio(fmt) and not has_video(fmt)]
+            common = {
+                "success": True, "pageUrl": entry.get("webpage_url") or target_url,
+                "title": entry.get("title") or "", "duration": float(entry.get("duration") or 0)
+            }
+            if muxed:
+                best_muxed = max(muxed, key=video_rank)
+                best_video = max(video_only, key=video_rank) if video_only else None
+                best_audio = max(audio_only, key=audio_rank) if audio_only else None
+                # Do not downgrade to a lower-resolution pre-muxed format when a
+                # higher-quality video plus a separate audio track is available.
+                if best_video and best_audio and video_rank(best_video) > video_rank(best_muxed):
+                    common.update({"mode": "mux", "video": payload(best_video), "audio": payload(best_audio)})
+                else:
+                    common.update({"mode": "single", "hasVideo": True, "hasAudio": True, "format": payload(best_muxed)})
+                return json.dumps(common)
+            if video_only and audio_only:
+                common.update({
+                    "mode": "mux",
+                    "video": payload(max(video_only, key=video_rank)),
+                    "audio": payload(max(audio_only, key=audio_rank))
+                })
+                return json.dumps(common)
+            if video_only or audio_only:
+                selected = max(video_only or audio_only, key=video_rank if video_only else audio_rank)
+                common.update({
+                    "mode": "single", "hasVideo": has_video(selected),
+                    "hasAudio": has_audio(selected), "format": payload(selected)
+                })
+                return json.dumps(common)
+            direct_url = entry.get("url")
+            if direct_url:
+                direct = dict(entry)
+                direct["url"] = direct_url
+                common.update({
+                    "mode": "single", "hasVideo": has_video(direct),
+                    "hasAudio": has_audio(direct), "format": payload(direct)
+                })
+                return json.dumps(common)
+            return json.dumps({"success": False, "error": "No downloadable yt-dlp formats found"})
+    except Exception as exc:
+        return json.dumps({"success": False, "error": "%s: %s" % (exc.__class__.__name__, exc)})
+
 
 def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_headers):
     """Downloads media exclusively via yt-dlp."""

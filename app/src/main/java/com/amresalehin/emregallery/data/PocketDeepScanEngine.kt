@@ -76,7 +76,7 @@ object PocketDeepScanEngine {
         scanJob = scope.launch(Dispatchers.Main) {
             val appContext = context.applicationContext
             var webView: WebView? = null
-            val seenUrls = mutableSetOf<String>()
+            val bestSeenByKey = mutableMapOf<String, MediaInboxItem>()
 
             try {
                 webView = createHardwareAcceleratedWebView(appContext, targetUrl)
@@ -123,7 +123,18 @@ object PocketDeepScanEngine {
 
                     val discoveredBatch = parseExtractedMediaJson(rawResult, targetUrl)
                     val newItems = discoveredBatch.filter { item ->
-                        seenUrls.add(item.sourceUrl)
+                        val key = MediaNormalizer.canonicalKey(item.sourceUrl)
+                        if (key.isBlank()) {
+                            false
+                        } else {
+                            val previous = bestSeenByKey[key]
+                            if (previous == null || MediaNormalizer.compareInboxItemQuality(item, previous) > 0) {
+                                bestSeenByKey[key] = item
+                                true
+                            } else {
+                                false
+                            }
+                        }
                     }
 
                     if (newItems.isNotEmpty()) {
@@ -272,50 +283,46 @@ object PocketDeepScanEngine {
                 for (var i = 0; i < imgs.length; i++) {
                     var el = imgs[i];
                     var src = el.currentSrc || el.src;
-                    var lazy = el.getAttribute('data-src') || el.getAttribute('data-original') ||
-                               el.getAttribute('data-lazy-src') || el.getAttribute('data-large-file') ||
-                               el.getAttribute('data-hi-res-src');
+                    var lazy = el.getAttribute('data-large-file') || el.getAttribute('data-hi-res-src') ||
+                               el.getAttribute('data-original') || el.getAttribute('data-lazy-src') ||
+                               el.getAttribute('data-src');
                     var alt = el.getAttribute('alt') || el.getAttribute('title') || '';
-                    if (lazy) add(lazy, alt, false);
-                    if (src) add(src, alt, false);
-
-                    // Parse srcset
+                    var selectedUrl = lazy || src;
+                    var selectedWidth = lazy ? Number.POSITIVE_INFINITY : 0;
                     var ss = el.getAttribute('srcset') || el.getAttribute('data-srcset');
                     if (ss) {
                         var parts = ss.split(',');
                         for (var p = 0; p < parts.length; p++) {
-                            var u = parts[p].trim().split(/\s+/)[0];
-                            if (u) add(u, alt, false);
+                            var tokens = parts[p].trim().split(/\s+/);
+                            var candidateUrl = tokens[0];
+                            var descriptor = tokens.length > 1 ? tokens[tokens.length - 1] : '';
+                            var widthMatch = descriptor.match(/^(\d+(?:\.\d+)?)w$/i);
+                            var densityMatch = descriptor.match(/^(\d+(?:\.\d+)?)x$/i);
+                            var candidateWidth = widthMatch ? parseFloat(widthMatch[1]) :
+                                (densityMatch ? parseFloat(densityMatch[1]) * (el.naturalWidth || 1) : 0);
+                            if (candidateUrl && candidateWidth >= selectedWidth) {
+                                selectedUrl = candidateUrl;
+                                selectedWidth = candidateWidth;
+                            }
                         }
                     }
-                }
-
-                // 2. Picture source elements
-                var sources = document.querySelectorAll('picture source');
-                for (var s = 0; s < sources.length; s++) {
-                    var pSrcset = sources[s].getAttribute('srcset') || sources[s].getAttribute('data-srcset');
-                    if (pSrcset) {
-                        var sparts = pSrcset.split(',');
-                        for (var sp = 0; sp < sparts.length; sp++) {
-                            var su = sparts[sp].trim().split(/\s+/)[0];
-                            if (su) add(su, 'Picture Source', false);
-                        }
-                    }
+                    if (selectedUrl) add(selectedUrl, alt, false);
                 }
 
                 // 3. Videos and video sources
                 var vids = document.getElementsByTagName('video');
                 for (var v = 0; v < vids.length; v++) {
                     var vEl = vids[v];
-                    var poster = vEl.getAttribute('poster');
-                    if (poster) add(poster, 'Video Poster', false);
+                    // Poster frames are previews, not independent media downloads.
                     var vSrc = vEl.currentSrc || vEl.src || vEl.getAttribute('data-src') || vEl.getAttribute('data-url');
-                    if (vSrc) add(vSrc, 'Video', true);
-                    var vs = vEl.getElementsByTagName('source');
-                    for (var vsIdx = 0; vsIdx < vs.length; vsIdx++) {
-                        var vsSrc = vs[vsIdx].src || vs[vsIdx].getAttribute('data-src') || vs[vsIdx].getAttribute('data-url');
-                        if (vsSrc) add(vsSrc, 'Video Stream', true);
+                    if (!vSrc) {
+                        var vs = vEl.getElementsByTagName('source');
+                        for (var vsIdx = 0; vsIdx < vs.length; vsIdx++) {
+                            var candidate = vs[vsIdx].src || vs[vsIdx].getAttribute('data-src') || vs[vsIdx].getAttribute('data-url');
+                            if (candidate) { vSrc = candidate; break; }
+                        }
                     }
+                    if (vSrc) add(vSrc, 'Video', true);
                 }
 
                 // Audio elements
@@ -323,12 +330,14 @@ object PocketDeepScanEngine {
                 for (var a = 0; a < audios.length; a++) {
                     var aEl = audios[a];
                     var aSrc = aEl.currentSrc || aEl.src || aEl.getAttribute('data-src');
-                    if (aSrc) add(aSrc, 'Audio', false);
-                    var asrcs = aEl.getElementsByTagName('source');
-                    for (var asIdx = 0; asIdx < asrcs.length; asIdx++) {
-                        var asSrc = asrcs[asIdx].src || asrcs[asIdx].getAttribute('data-src');
-                        if (asSrc) add(asSrc, 'Audio Stream', false);
+                    if (!aSrc) {
+                        var asrcs = aEl.getElementsByTagName('source');
+                        for (var asIdx = 0; asIdx < asrcs.length; asIdx++) {
+                            var candidate = asrcs[asIdx].src || asrcs[asIdx].getAttribute('data-src');
+                            if (candidate) { aSrc = candidate; break; }
+                        }
                     }
+                    if (aSrc) add(aSrc, 'Audio', false);
                 }
 
                 // 4. Background images in visible styles
@@ -402,6 +411,7 @@ object PocketDeepScanEngine {
 
                 val resolvedUrl = LinkMetadataFetcher.resolveAbsoluteUrl(baseUrl, rawUrl)
                 if (resolvedUrl.isBlank() || !resolvedUrl.startsWith("http", ignoreCase = true)) continue
+                if (MediaClassifier.isMediaFragment(resolvedUrl)) continue
 
                 val titleHint = obj.optString("title", "").ifBlank {
                     resolvedUrl.substringAfterLast('/').substringBefore('?').takeIf { it.isNotBlank() && it.length > 2 } ?: "Discovered Media"
@@ -426,7 +436,7 @@ object PocketDeepScanEngine {
 
                 items.add(
                     MediaInboxItem(
-                        id = "deep_${System.currentTimeMillis()}_${resolvedUrl.hashCode().toUInt().toString(16)}",
+                        id = "deep_${MediaNormalizer.canonicalKey(resolvedUrl).hashCode().toUInt().toString(16)}",
                         title = titleHint,
                         localUri = "",
                         sourceUrl = resolvedUrl,

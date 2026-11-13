@@ -293,12 +293,45 @@ object FfmpegKitEngine {
         outputFile: File
     ): Boolean = withContext(Dispatchers.IO) {
         try {
-            // -y -i video -i audio -c:v copy -c:a aac -movflags +faststart output.mp4
-            val cmd = "-y -i \"${videoFile.absolutePath}\" -i \"${audioFile.absolutePath}\" -c:v copy -c:a aac -movflags +faststart \"${outputFile.absolutePath}\""
-            val result = executeCommand(cmd)
-            result.isSuccess && outputFile.exists() && outputFile.length() > 0L
+            if (!videoFile.isFile || videoFile.length() <= 0L ||
+                !audioFile.isFile || audioFile.length() <= 0L) return@withContext false
+
+            val videoInput = probeMedia(videoFile.absolutePath) ?: return@withContext false
+            val audioInput = probeMedia(audioFile.absolutePath) ?: return@withContext false
+            if (videoInput.videoCodec.isNullOrBlank() || audioInput.audioCodec.isNullOrBlank()) {
+                return@withContext false
+            }
+
+            // Keep video unchanged. Copy AAC; convert other audio codecs to AAC for MP4.
+            val audioCodec = if (audioInput.audioCodec.equals("AAC", ignoreCase = true)) "copy" else "aac"
+            outputFile.delete()
+            val cmd = "-y -i \"${videoFile.absolutePath}\" -i \"${audioFile.absolutePath}\" " +
+                "-map 0:v:0 -map 1:a:0 -sn -dn -c:v copy -c:a $audioCodec " +
+                "-movflags +faststart \"${outputFile.absolutePath}\""
+            var result = executeCommand(cmd)
+            if (!result.isSuccess || !outputFile.isFile || outputFile.length() <= 0L) {
+                outputFile.delete()
+                val fallbackCmd = "-y -i \"${videoFile.absolutePath}\" -i \"${audioFile.absolutePath}\" " +
+                    "-map 0:v:0 -map 1:a:0 -sn -dn -c:v libx264 -preset fast -crf 18 " +
+                    "-c:a aac -b:a 192k -movflags +faststart \"${outputFile.absolutePath}\""
+                result = executeCommand(fallbackCmd)
+            }
+            if (!result.isSuccess || !outputFile.isFile || outputFile.length() <= 0L) {
+                outputFile.delete()
+                return@withContext false
+            }
+
+            val outputInfo = probeMedia(outputFile.absolutePath)
+            val valid = outputInfo != null &&
+                !outputInfo.videoCodec.isNullOrBlank() &&
+                !outputInfo.audioCodec.isNullOrBlank() &&
+                outputInfo.durationSeconds > 0.0 &&
+                outputInfo.sizeBytes > 0L
+            if (!valid) outputFile.delete()
+            valid
         } catch (e: Throwable) {
             Log.e(TAG, "muxAudioAndVideo failed", e)
+            outputFile.delete()
             false
         }
     }
@@ -470,27 +503,54 @@ object FfmpegKitEngine {
     suspend fun remuxStream(
         streamUrl: String,
         outputFile: File,
-        context: Context? = null
+        context: Context? = null,
+        headers: Map<String, String> = emptyMap()
     ): FfmpegExecutionResult = withContext(Dispatchers.IO) {
-        val cmd = "-y -i \"$streamUrl\" -c copy -bsf:a aac_adtstoasc -movflags +faststart \"${outputFile.absolutePath}\""
-        val res = executeCommand(cmd)
-        if (res.isSuccess && outputFile.exists() && outputFile.length() > 0L) {
+        fun quote(value: String): String =
+            "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+        val headerLines = headers.entries
+            .filter { it.key.isNotBlank() && it.value.isNotBlank() }
+            .joinToString("\\r\\n") { (key, value) ->
+                key.replace(":", "").replace("\\r", "").replace("\\n", "") +
+                    ": " + value.replace("\\r", "").replace("\\n", "").replace("\"", "")
+            }
+        val headerArg = if (headerLines.isBlank()) "" else "-headers \"${headerLines}\\r\\n\" "
+        val tempFile = File(outputFile.parentFile ?: outputFile.absoluteFile.parentFile, outputFile.nameWithoutExtension + ".part.mp4")
+        tempFile.delete()
+
+        val inputArg = headerArg + "-i ${quote(streamUrl)}"
+        val copyCmd = "-y $inputArg -map 0:v:0? -map 0:a:0? -sn -dn -c copy -movflags +faststart ${quote(tempFile.absolutePath)}"
+        var result = executeCommand(copyCmd)
+
+        suspend fun hasValidVideo(): Boolean {
+            if (!tempFile.isFile || tempFile.length() <= 0L) return false
+            val info = probeMedia(tempFile.absolutePath) ?: return false
+            return !info.videoCodec.isNullOrBlank() && info.durationSeconds > 0.0 && info.sizeBytes > 0L
+        }
+
+        if (!result.isSuccess || !hasValidVideo()) {
+            tempFile.delete()
+            val transcodeCmd = "-y $inputArg -map 0:v:0? -map 0:a:0? -sn -dn " +
+                "-c:v libx264 -preset fast -crf 20 -c:a aac -b:a 192k " +
+                "-movflags +faststart ${quote(tempFile.absolutePath)}"
+            result = executeCommand(transcodeCmd)
+        }
+
+        if (!result.isSuccess || !hasValidVideo()) {
+            tempFile.delete()
+            outputFile.delete()
+            result.copy(isSuccess = false, outputFile = null)
+        } else {
+            outputFile.delete()
+            if (!tempFile.renameTo(outputFile)) {
+                tempFile.copyTo(outputFile, overwrite = true)
+                tempFile.delete()
+            }
             context?.let { ctx ->
                 android.media.MediaScannerConnection.scanFile(ctx, arrayOf(outputFile.absolutePath), arrayOf("video/mp4"), null)
             }
-            res.copy(outputFile = outputFile)
-        } else {
-            // Fallback: transcode stream if direct bitstream copy fails
-            val transcodeCmd = "-y -i \"$streamUrl\" -c:v libx264 -preset fast -c:a aac -movflags +faststart \"${outputFile.absolutePath}\""
-            val transRes = executeCommand(transcodeCmd)
-            if (transRes.isSuccess && outputFile.exists() && outputFile.length() > 0L) {
-                context?.let { ctx ->
-                    android.media.MediaScannerConnection.scanFile(ctx, arrayOf(outputFile.absolutePath), arrayOf("video/mp4"), null)
-                }
-                transRes.copy(outputFile = outputFile)
-            } else {
-                transRes.copy(isSuccess = false)
-            }
+            result.copy(outputFile = outputFile)
         }
     }
 }

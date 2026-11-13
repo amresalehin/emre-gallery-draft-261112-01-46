@@ -243,6 +243,28 @@ class MediaDeduplicationPureUnitTest {
     }
 
     @Test
+    fun inboxDeduplicationCollapsesImageResizeVariantsAndRetainsCachedFile() {
+        val cachedSmall = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "cached_small", title = "photo.jpg", localUri = "file:///cache/photo.jpg",
+            sourceUrl = "https://cdn.example.com/photo.jpg?width=320&quality=50",
+            isVideo = false, sizeBytes = 12000L
+        )
+        val remoteLarge = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "remote_large", title = "photo.jpg", localUri = "",
+            sourceUrl = "https://cdn.example.com/photo.jpg?width=1600&quality=90",
+            isVideo = false, sizeBytes = 240000L
+        )
+        assertEquals(MediaClassifier.deduplicationKey(cachedSmall.sourceUrl),
+            MediaClassifier.deduplicationKey(remoteLarge.sourceUrl))
+        val result = com.amresalehin.emregallery.data.MediaNormalizer
+            .deduplicateMediaInboxItems(listOf(cachedSmall, remoteLarge))
+        assertEquals(1, result.size)
+        assertEquals(remoteLarge.sourceUrl, result.single().sourceUrl)
+        assertEquals(cachedSmall.localUri, result.single().localUri)
+        assertEquals(240000L, result.single().sizeBytes)
+    }
+
+    @Test
     fun testMediaRepositoryRejectsXmlAndNonMediaFiles() {
         val nonMediaSamples = listOf(
             Pair("AndroidManifest.xml", "text/xml"),

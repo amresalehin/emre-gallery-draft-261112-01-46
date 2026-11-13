@@ -546,7 +546,8 @@ object OkHttpDownloader {
         downloadId: String? = null,
         headers: Map<String, String>? = null,
         domain: String? = null,
-        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
+        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null,
+        targetDirectory: File? = null
     ): DownloadResult = withContext(Dispatchers.IO) {
         val effectiveDomain = domain?.takeIf { it.isNotBlank() }
             ?: extractDomain(referer ?: mediaUrl).takeIf { it != "general" && it != "localhost" }
@@ -556,8 +557,8 @@ object OkHttpDownloader {
             return@withContext downloadDataUriMedia(context, mediaUrl, fileName, downloadId, effectiveDomain)
         }
 
-        val baseDir = getTargetStorageDir(context, null)
-        val domainDir = if (effectiveDomain != null) getTargetStorageDir(context, effectiveDomain) else baseDir
+        val baseDir = targetDirectory ?: getTargetStorageDir(context, null)
+        val domainDir = targetDirectory ?: if (effectiveDomain != null) getTargetStorageDir(context, effectiveDomain) else baseDir
 
         val sanitizedName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
         val deterministicBase = if (!downloadId.isNullOrBlank()) {

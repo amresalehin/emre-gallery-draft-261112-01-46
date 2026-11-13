@@ -472,6 +472,7 @@ class PocketRepository(
         try {
             val jsonArray = JSONArray(rawJson)
             val list = mutableListOf<MediaInboxStack>()
+            var needsPersistence = !bookmarksFile.exists() || bookmarksFile.length() == 0L
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
                 val itemsArr = obj.optJSONArray("items")
@@ -496,13 +497,16 @@ class PocketRepository(
                     }
                 }
 
+                val normalizedItems = MediaNormalizer.deduplicateMediaInboxItems(itemsList)
+                if (normalizedItems.size != itemsList.size) needsPersistence = true
+
                 list.add(
                     MediaInboxStack(
                         id = obj.getString("id"),
                         title = obj.optString("title", "Untitled Bookmark"),
                         sourceDomain = obj.optString("sourceDomain", ""),
                         sourceUrl = obj.optString("sourceUrl", ""),
-                        items = itemsList,
+                        items = normalizedItems,
                         timestampMillis = obj.optLong("timestampMillis", System.currentTimeMillis()),
                         description = obj.optString("description", ""),
                         previewImageUrl = obj.optString("previewImageUrl", "")
@@ -511,8 +515,8 @@ class PocketRepository(
             }
             _bookmarks.value = list
 
-            // If loaded from SharedPreferences migration, persist to persistent file and clean up prefs
-            if (!bookmarksFile.exists() || bookmarksFile.length() == 0L) {
+            // Normalize legacy duplicate media during load without discarding cached local files.
+            if (needsPersistence) {
                 persist()
                 prefs.edit().remove(KEY_BOOKMARKS_JSON).apply()
             }
@@ -905,7 +909,10 @@ class PocketRepository(
     }
 
     fun updateBookmark(updated: MediaInboxStack) {
-        _bookmarks.value = _bookmarks.value.map { if (it.id == updated.id) updated else it }
+        val normalized = updated.copy(
+            items = MediaNormalizer.deduplicateMediaInboxItems(updated.items)
+        )
+        _bookmarks.value = _bookmarks.value.map { if (it.id == normalized.id) normalized else it }
         persist()
     }
 

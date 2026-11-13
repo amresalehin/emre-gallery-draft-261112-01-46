@@ -98,12 +98,15 @@ object MediaNormalizer {
             canonicalKey(src).ifBlank { item.id }
         }
         val largestList = groups.values.map { group ->
-            if (group.size == 1) group.first()
-            else {
-                group.maxWithOrNull { a, b ->
-                    compareInboxItemQuality(a, b)
-                } ?: group.first()
-            }
+            val winner = group.maxWithOrNull { a, b ->
+                compareInboxItemQuality(a, b)
+            } ?: group.first()
+            val cached = group.firstOrNull { it.localUri.isNotBlank() }
+            winner.copy(
+                id = winner.id.ifBlank { cached?.id.orEmpty() },
+                localUri = winner.localUri.ifBlank { cached?.localUri.orEmpty() },
+                sizeBytes = maxOf(winner.sizeBytes, cached?.sizeBytes ?: 0L)
+            )
         }
         val (videos, images) = largestList.partition { it.isVideo || it.isStream }
         return (videos + images)
