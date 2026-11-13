@@ -108,38 +108,11 @@ object MediaNormalizer {
                 sizeBytes = maxOf(winner.sizeBytes, cached?.sizeBytes ?: 0L)
             )
         }
-        // Pocket items are accumulated across incremental scans. Use their owning page URL
-        // to pair platform-specific audio streams with the corresponding video, even when
-        // the two tracks were discovered in different batches.
-        val pairingCandidates = largestList.map { item ->
-            val mediaUrl = item.sourceUrl.ifBlank { item.localUri }
-            ScrapedMediaItem(
-                id = item.id,
-                url = mediaUrl,
-                title = item.title,
-                isVideo = item.isVideo,
-                isAudio = item.isAudio,
-                isStream = item.isStream,
-                format = item.format,
-                provenance = MediaProvenance(pageUrl = pageUrl),
-                metadata = if (pageUrl.isBlank()) emptyMap() else mapOf("source_url" to pageUrl)
-            )
-        }
-        val pairedAudioUrls = pairingCandidates
-            .filter { it.isAudio }
-            .filter { audio ->
-                pairingCandidates.any { video ->
-                    video.url != audio.url && MediaClassifier.isSeparateAudioCompanion(audio, video)
-                }
-            }
-            .map { it.url }
-            .toSet()
-        val withoutCompanionAudio = largestList.filterNot { item ->
-            item.isAudio && item.sourceUrl.ifBlank { item.localUri } in pairedAudioUrls
-        }
-
-        val (videos, images) = withoutCompanionAudio.partition { it.isVideo || it.isStream }
-        return (videos + images)
+        // Pocket is a media inventory, not a muxed-download result. Keep separate audio
+        // representations visible and addressable; the downloader can pair/mux them later.
+        // Do not silently remove a unique audio URL merely because a related video exists.
+        val (videosAndStreams, nonVideoMedia) = largestList.partition { it.isVideo || it.isStream }
+        return videosAndStreams + nonVideoMedia
     }
 
     /**
