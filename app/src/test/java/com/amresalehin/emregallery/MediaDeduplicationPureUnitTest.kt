@@ -265,6 +265,80 @@ class MediaDeduplicationPureUnitTest {
     }
 
     @Test
+    fun pocketInboxDeduplicationFoldsYouTubeAndRedditAudioAcrossIncrementalBatches() {
+        val pageUrl = "https://www.youtube.com/watch?v=abcdefghijk"
+        val youtubeAudio = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "youtube_audio",
+            title = "Audio",
+            localUri = "",
+            sourceUrl = "https://r1---sn.googlevideo.com/videoplayback?mime=audio%2Fmp4&itag=140&id=audio-track",
+            isVideo = false,
+            isAudio = true,
+            format = "M4A"
+        )
+        val youtubeVideo = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "youtube_video",
+            title = "Video",
+            localUri = "",
+            sourceUrl = "https://r1---sn.googlevideo.com/videoplayback?mime=video%2Fmp4&itag=137&id=video-track",
+            isVideo = true,
+            format = "MP4"
+        )
+        assertTrue(MediaClassifier.classify(youtubeAudio.sourceUrl).isAudio)
+        assertEquals(
+            listOf("youtube_video"),
+            com.amresalehin.emregallery.data.MediaNormalizer
+                .deduplicateMediaInboxItems(listOf(youtubeAudio, youtubeVideo), pageUrl).map { it.id }
+        )
+        assertEquals(
+            listOf("youtube_video"),
+            com.amresalehin.emregallery.data.MediaNormalizer
+                .deduplicateMediaInboxItems(listOf(youtubeVideo, youtubeAudio), pageUrl).map { it.id }
+        )
+
+        val redditAudio = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "reddit_audio",
+            title = "Audio",
+            localUri = "",
+            sourceUrl = "https://v.redd.it/post123/DASH_AUDIO_128.mp4",
+            isVideo = false,
+            isAudio = true,
+            format = "M4A"
+        )
+        val redditVideo = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "reddit_video",
+            title = "Video",
+            localUri = "",
+            sourceUrl = "https://v.redd.it/post123/DASH_720.mp4",
+            isVideo = true,
+            format = "MP4"
+        )
+        assertTrue(MediaClassifier.classify(redditAudio.sourceUrl).isAudio)
+        assertEquals(
+            listOf("reddit_video"),
+            com.amresalehin.emregallery.data.MediaNormalizer
+                .deduplicateMediaInboxItems(listOf(redditAudio, redditVideo), "https://www.reddit.com/comments/post123")
+                .map { it.id }
+        )
+    }
+
+    @Test
+    fun pocketNormalizerRetainsIndependentArticleAudio() {
+        val pageUrl = "https://example.com/article"
+        val video = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "article_video", title = "Video", localUri = "",
+            sourceUrl = "https://cdn.example.com/video.mp4", isVideo = true
+        )
+        val audio = com.amresalehin.emregallery.data.MediaInboxItem(
+            id = "article_audio", title = "Interview", localUri = "",
+            sourceUrl = "https://cdn.example.com/interview.mp3", isVideo = false, isAudio = true
+        )
+        val result = com.amresalehin.emregallery.data.MediaNormalizer
+            .deduplicateMediaInboxItems(listOf(video, audio), pageUrl)
+        assertEquals(setOf("article_video", "article_audio"), result.map { it.id }.toSet())
+    }
+
+    @Test
     fun testMediaRepositoryRejectsXmlAndNonMediaFiles() {
         val nonMediaSamples = listOf(
             Pair("AndroidManifest.xml", "text/xml"),

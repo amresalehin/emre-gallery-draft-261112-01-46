@@ -1114,7 +1114,7 @@ object MediaClassifier {
      * Returns true only for known platform-specific audio components of the supplied video.
      * Generic audio on the same article/page is deliberately retained as independent media.
      */
-    private fun isSeparateAudioCompanion(audio: ScrapedMediaItem, video: ScrapedMediaItem): Boolean {
+    internal fun isSeparateAudioCompanion(audio: ScrapedMediaItem, video: ScrapedMediaItem): Boolean {
         if (!audio.isAudio || (!video.isVideo && !video.isStream)) return false
         val audioUri = mediaUri(audio.url) ?: return false
         val videoUri = mediaUri(video.url) ?: return false
@@ -1330,6 +1330,22 @@ object MediaClassifier {
         val pathFileName = parsedUri?.path.orEmpty().substringAfterLast('/')
         if (host == "v.redd.it" && (pathFileName.startsWith("DASH_AUDIO", ignoreCase = true) || pathFileName.startsWith("DASH-AUDIO", ignoreCase = true))) {
             return ClassificationResult(category = MediaCategory.AUDIO, format = "M4A", mimeType = "audio/mp4", isVideo = false, isAudio = true, isStream = false)
+        }
+
+        // YouTube's separate audio representations use /videoplayback with a MIME query parameter.
+        val rawQuery = parsedUri?.rawQuery.orEmpty().lowercase(Locale.ROOT)
+        val isGoogleVideoAudio = host.endsWith("googlevideo.com") &&
+            Regex("""(?:^|&)mime=audio(?:%2f|/)""").containsMatchIn(rawQuery)
+        if (isGoogleVideoAudio) {
+            val isWebmAudio = rawQuery.contains("audio%2fwebm") || rawQuery.contains("audio/webm")
+            return ClassificationResult(
+                category = MediaCategory.AUDIO,
+                format = if (isWebmAudio) "WEBM" else "M4A",
+                mimeType = if (isWebmAudio) "audio/webm" else "audio/mp4",
+                isVideo = false,
+                isAudio = true,
+                isStream = false
+            )
         }
 
         // 1. Streaming media (HLS & DASH)

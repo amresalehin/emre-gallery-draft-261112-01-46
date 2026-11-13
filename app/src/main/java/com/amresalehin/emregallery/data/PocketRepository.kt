@@ -497,7 +497,7 @@ class PocketRepository(
                     }
                 }
 
-                val normalizedItems = MediaNormalizer.deduplicateMediaInboxItems(itemsList)
+                val normalizedItems = MediaNormalizer.deduplicateMediaInboxItems(itemsList, obj.optString("sourceUrl", ""))
                 if (normalizedItems.size != itemsList.size) needsPersistence = true
 
                 list.add(
@@ -661,7 +661,7 @@ class PocketRepository(
 
         val existingBookmark = _bookmarks.value.firstOrNull { it.sourceUrl.isNotBlank() && it.sourceUrl == cleanUrl }
         val rawItems = directItems + initialItems + (existingBookmark?.items ?: emptyList())
-        val finalItems = MediaNormalizer.deduplicateMediaInboxItems(rawItems)
+        val finalItems = MediaNormalizer.deduplicateMediaInboxItems(rawItems, cleanUrl)
 
         val initialPreview = previewImageUrl.ifBlank {
             if (isMedia) cleanUrl
@@ -724,7 +724,7 @@ class PocketRepository(
                     meta.mediaItems
                 } else if (latest.items.isNotEmpty()) {
                     if (meta.mediaItems.isNotEmpty()) {
-                        MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems)
+                        MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems, latest.sourceUrl)
                     } else {
                         latest.items
                     }
@@ -801,7 +801,7 @@ class PocketRepository(
                 // Groups CDN size variants, selects the largest variant, and prioritizes video streams
                 val resolvedItems = if (newCandidates.isNotEmpty()) {
                     val combined = newCandidates + current.items
-                    MediaNormalizer.deduplicateMediaInboxItems(combined).take(60)
+                    MediaNormalizer.deduplicateMediaInboxItems(combined, current.sourceUrl).take(60)
                 } else {
                     // Preserve existing cached media if refresh returned empty
                     current.items
@@ -868,7 +868,7 @@ class PocketRepository(
             onIncrementalMediaDiscovered = { newCandidates ->
                 val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@startScan
                 val combined = newCandidates + current.items
-                val resolvedItems = MediaNormalizer.deduplicateMediaInboxItems(combined).take(1000)
+                val resolvedItems = MediaNormalizer.deduplicateMediaInboxItems(combined, current.sourceUrl).take(1000)
                 val newPreview = if (current.previewImageUrl.isBlank()) {
                     resolvedItems.firstOrNull { !it.isVideo }?.sourceUrl
                         ?: resolvedItems.firstOrNull()?.sourceUrl
@@ -910,7 +910,7 @@ class PocketRepository(
 
     fun updateBookmark(updated: MediaInboxStack) {
         val normalized = updated.copy(
-            items = MediaNormalizer.deduplicateMediaInboxItems(updated.items)
+            items = MediaNormalizer.deduplicateMediaInboxItems(updated.items, updated.sourceUrl)
         )
         _bookmarks.value = _bookmarks.value.map { if (it.id == normalized.id) normalized else it }
         persist()

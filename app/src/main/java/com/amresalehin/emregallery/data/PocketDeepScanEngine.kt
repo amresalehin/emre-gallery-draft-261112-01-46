@@ -416,22 +416,20 @@ object PocketDeepScanEngine {
                 val titleHint = obj.optString("title", "").ifBlank {
                     resolvedUrl.substringAfterLast('/').substringBefore('?').takeIf { it.isNotBlank() && it.length > 2 } ?: "Discovered Media"
                 }
-                val isVideo = obj.optBoolean("isVideo", false)
-                val isStream = resolvedUrl.contains(".m3u8", ignoreCase = true) || resolvedUrl.contains(".mpd", ignoreCase = true)
-                val isAudio = resolvedUrl.contains(".mp3", ignoreCase = true) || resolvedUrl.contains(".aac", ignoreCase = true) ||
-                        resolvedUrl.contains(".ogg", ignoreCase = true) || resolvedUrl.contains(".wav", ignoreCase = true) ||
-                        resolvedUrl.contains(".m4a", ignoreCase = true)
+                val classification = MediaClassifier.classify(resolvedUrl)
+                val isAudioHint = titleHint.startsWith("Audio", ignoreCase = true)
+                val isAudio = classification.isAudio || isAudioHint
+                val isStream = classification.isStream ||
+                    resolvedUrl.contains(".m3u8", ignoreCase = true) ||
+                    resolvedUrl.contains(".mpd", ignoreCase = true)
+                // An audio MIME/path classification overrides the DOM/resource extension hint.
+                val isVideo = !isAudio && (obj.optBoolean("isVideo", false) || classification.isVideo || isStream)
                 val format = when {
-                    isStream -> "M3U8"
-                    resolvedUrl.contains(".webm", ignoreCase = true) -> "WEBM"
-                    isVideo || resolvedUrl.contains(".mp4", ignoreCase = true) -> "MP4"
-                    isAudio -> "AUDIO"
-                    resolvedUrl.contains(".png", ignoreCase = true) -> "PNG"
-                    resolvedUrl.contains(".gif", ignoreCase = true) -> "GIF"
-                    resolvedUrl.contains(".webp", ignoreCase = true) -> "WEBP"
-                    resolvedUrl.contains(".svg", ignoreCase = true) -> "SVG"
-                    resolvedUrl.contains(".avif", ignoreCase = true) -> "AVIF"
-                    else -> "JPEG"
+                    isAudio -> if (classification.isAudio) classification.format else "AUDIO"
+                    isStream -> if (resolvedUrl.contains(".mpd", ignoreCase = true)) "MPD" else "M3U8"
+                    isVideo && resolvedUrl.contains(".webm", ignoreCase = true) -> "WEBM"
+                    isVideo -> "MP4"
+                    else -> classification.format
                 }
 
                 items.add(
@@ -451,6 +449,6 @@ object PocketDeepScanEngine {
         } catch (e: Exception) {
             Log.w(TAG, "Failed parsing deep scan media JSON", e)
         }
-        return items
+        return MediaNormalizer.deduplicateMediaInboxItems(items, baseUrl)
     }
 }

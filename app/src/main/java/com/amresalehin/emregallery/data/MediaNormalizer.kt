@@ -91,7 +91,7 @@ object MediaNormalizer {
      * by canonical key, and keeping the largest / highest-quality variant in each group.
      * Prevents over-merging by strictly preserving identifying query parameters.
      */
-    fun deduplicateMediaInboxItems(items: List<MediaInboxItem>): List<MediaInboxItem> {
+    fun deduplicateMediaInboxItems(items: List<MediaInboxItem>, pageUrl: String = ""): List<MediaInboxItem> {
         if (items.isEmpty()) return emptyList()
         val groups = items.groupBy { item ->
             val src = item.sourceUrl.ifBlank { item.localUri }
@@ -108,7 +108,37 @@ object MediaNormalizer {
                 sizeBytes = maxOf(winner.sizeBytes, cached?.sizeBytes ?: 0L)
             )
         }
-        val (videos, images) = largestList.partition { it.isVideo || it.isStream }
+        // Pocket items are accumulated across incremental scans. Use their owning page URL
+        // to pair platform-specific audio streams with the corresponding video, even when
+        // the two tracks were discovered in different batches.
+        val pairingCandidates = largestList.map { item ->
+            val mediaUrl = item.sourceUrl.ifBlank { item.localUri }
+            ScrapedMediaItem(
+                id = item.id,
+                url = mediaUrl,
+                title = item.title,
+                isVideo = item.isVideo,
+                isAudio = item.isAudio,
+                isStream = item.isStream,
+                format = item.format,
+                provenance = MediaProvenance(pageUrl = pageUrl),
+                metadata = if (pageUrl.isBlank()) emptyMap() else mapOf("source_url" to pageUrl)
+            )
+        }
+        val pairedAudioUrls = pairingCandidates
+            .filter { it.isAudio }
+            .filter { audio ->
+                pairingCandidates.any { video ->
+                    video.url != audio.url && MediaClassifier.isSeparateAudioCompanion(audio, video)
+                }
+            }
+            .map { it.url }
+            .toSet()
+        val withoutCompanionAudio = largestList.filterNot { item ->
+            item.isAudio && item.sourceUrl.ifBlank { item.localUri } in pairedAudioUrls
+        }
+
+        val (videos, images) = withoutCompanionAudio.partition { it.isVideo || it.isStream }
         return (videos + images)
     }
 
