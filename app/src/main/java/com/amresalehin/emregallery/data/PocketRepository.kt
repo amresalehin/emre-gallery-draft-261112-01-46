@@ -112,6 +112,9 @@ class PocketRepository(
             .apply()
     }
 
+    // Refresh, Deep Scan and asynchronous size probes can update the same bookmark concurrently.
+    // Serialize their read-modify-write operations so a stale snapshot cannot overwrite newer media.
+    private val bookmarkMutationLock = Any()
     private val sizeCache = ConcurrentHashMap<String, Long>()
     private val activeProbes = ConcurrentHashMap.newKeySet<String>()
 
@@ -343,23 +346,25 @@ class PocketRepository(
     }
 
     private fun updateItemSizeInBookmarks(itemId: String, url: String, sizeBytes: Long) {
-        var changed = false
-        val updatedList = _bookmarks.value.map { stack ->
-            var stackChanged = false
-            val updatedItems = stack.items.map { item ->
-                if ((item.id == itemId || item.sourceUrl == url) && item.sizeBytes != sizeBytes) {
-                    stackChanged = true
-                    item.copy(sizeBytes = sizeBytes)
-                } else item
+        synchronized(bookmarkMutationLock) {
+            var changed = false
+            val updatedList = _bookmarks.value.map { stack ->
+                var stackChanged = false
+                val updatedItems = stack.items.map { item ->
+                    if ((item.id == itemId || item.sourceUrl == url) && item.sizeBytes != sizeBytes) {
+                        stackChanged = true
+                        item.copy(sizeBytes = sizeBytes)
+                    } else item
+                }
+                if (stackChanged) {
+                    changed = true
+                    stack.copy(items = updatedItems)
+                } else stack
             }
-            if (stackChanged) {
-                changed = true
-                stack.copy(items = updatedItems)
-            } else stack
-        }
-        if (changed) {
-            _bookmarks.value = updatedList
-            persist()
+            if (changed) {
+                _bookmarks.value = updatedList
+                persist()
+            }
         }
     }
 
@@ -716,42 +721,48 @@ class PocketRepository(
                 if (targetUrl.isBlank()) return@launch
 
                 val meta = LinkMetadataFetcher.fetch(targetUrl)
-                val latest = _bookmarks.value.find { it.id == bookmarkId } ?: return@launch
+                synchronized(bookmarkMutationLock) {
+                    // Always merge against the latest state, not the snapshot taken before the network request.
+                    val latest = _bookmarks.value.find { it.id == bookmarkId } ?: return@synchronized
 
-                val cleanDomain = latest.sourceDomain.ifBlank { MediaClassifier.cleanDomainFromUrl(targetUrl) }
-                val isTitleDefault = latest.title.isBlank() ||
-                        latest.title.equals(cleanDomain, ignoreCase = true) ||
-                        latest.title.equals(targetUrl, ignoreCase = true) ||
-                        latest.title == "Untitled Bookmark"
+                    val cleanDomain = latest.sourceDomain.ifBlank { MediaClassifier.cleanDomainFromUrl(targetUrl) }
+                    val isTitleDefault = latest.title.isBlank() ||
+                            latest.title.equals(cleanDomain, ignoreCase = true) ||
+                            latest.title.equals(targetUrl, ignoreCase = true) ||
+                            latest.title == "Untitled Bookmark"
 
-                val newTitle = if (isTitleDefault && meta.title.isNotBlank()) meta.title else latest.title
-                val newDesc = if (latest.description.isBlank() && meta.description.isNotBlank()) meta.description else latest.description
-                val newDomain = if (latest.sourceDomain.isBlank() && meta.domain.isNotBlank()) meta.domain else latest.sourceDomain
+                    val newTitle = if (isTitleDefault && meta.title.isNotBlank()) meta.title else latest.title
+                    val newDesc = if (latest.description.isBlank() && meta.description.isNotBlank()) meta.description else latest.description
+                    val newDomain = if (latest.sourceDomain.isBlank() && meta.domain.isNotBlank()) meta.domain else latest.sourceDomain
 
-                val newItems = if (meta.mediaItems.isNotEmpty()) {
-                    MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems, latest.sourceUrl)
-                } else {
-                    latest.items
-                }
+                    // Existing items are first: equal-quality duplicates retain their existing identity/cache.
+                    // New candidates are additive; only canonical duplicates are coalesced.
+                    val newItems = if (meta.mediaItems.isNotEmpty()) {
+                        MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems, latest.sourceUrl)
+                    } else {
+                        latest.items
+                    }
 
-                val newPreview = if (newItems.isNotEmpty()) {
-                    newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
-                        ?: newItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
-                        ?: latest.previewImageUrl
-                } else {
-                    latest.previewImageUrl
-                }
+                    val newPreview = if (newItems.isNotEmpty()) {
+                        newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                            ?: newItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
+                            ?: latest.previewImageUrl
+                    } else {
+                        latest.previewImageUrl
+                    }
 
-                if (newTitle != latest.title || newDesc != latest.description || newPreview != latest.previewImageUrl ||
-                    newDomain != latest.sourceDomain || newItems != latest.items) {
-                    val updated = latest.copy(
-                        title = newTitle,
-                        description = newDesc,
-                        previewImageUrl = newPreview,
-                        sourceDomain = newDomain,
-                        items = newItems
-                    )
-                    updateBookmark(updated)
+                    if (newTitle != latest.title || newDesc != latest.description || newPreview != latest.previewImageUrl ||
+                        newDomain != latest.sourceDomain || newItems != latest.items) {
+                        updateBookmarkLocked(
+                            latest.copy(
+                                title = newTitle,
+                                description = newDesc,
+                                previewImageUrl = newPreview,
+                                sourceDomain = newDomain,
+                                items = newItems
+                            )
+                        )
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching metadata for bookmark $bookmarkId", e)
@@ -789,50 +800,51 @@ class PocketRepository(
                     null
                 }
 
-                val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@launch
                 if (meta == null) {
                     // Refresh failed: preserve existing cached media and metadata intact!
                     return@launch
                 }
 
-                // Filter out external favicon urls from media items
-                val newCandidates = meta.mediaItems.filterNot { item ->
-                    item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
+                synchronized(bookmarkMutationLock) {
+                    // Re-read after network I/O. Deep Scan may have added items while Refresh was fetching.
+                    val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@synchronized
+
+                    val newCandidates = meta.mediaItems.filterNot { item ->
+                        item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
+                    }
+
+                    // Strictly additive: retain all existing unique items, then merge new discoveries.
+                    // Deduplication only coalesces canonical variants of the same asset.
+                    val resolvedItems = if (newCandidates.isNotEmpty()) {
+                        MediaNormalizer.deduplicateMediaInboxItems(current.items + newCandidates, current.sourceUrl)
+                    } else {
+                        current.items
+                    }
+
+                    val newPreview = when {
+                        meta.previewImageUrl.isNotBlank() -> meta.previewImageUrl
+                        resolvedItems.isNotEmpty() -> resolvedItems.firstOrNull { !it.isVideo && !it.isStream }?.sourceUrl
+                            ?: resolvedItems.firstOrNull()?.sourceUrl
+                            ?: current.previewImageUrl
+                        else -> current.previewImageUrl
+                    }
+
+                    val cleanDomain = current.sourceDomain.ifBlank { meta.domain }
+                    val isTitleDefault = current.title.isBlank() ||
+                        current.title.equals(cleanDomain, ignoreCase = true) ||
+                        current.title.equals(current.sourceUrl, ignoreCase = true) ||
+                        current.title == "Untitled Bookmark"
+
+                    val updated = current.copy(
+                        title = if (isTitleDefault && meta.title.isNotBlank()) meta.title else current.title,
+                        description = if (current.description.isBlank() && meta.description.isNotBlank()) meta.description else current.description,
+                        previewImageUrl = if (newPreview.isNotBlank()) newPreview else current.previewImageUrl,
+                        sourceDomain = cleanDomain,
+                        items = resolvedItems
+                    )
+                    updateBookmarkLocked(updated)
+                    Log.d(TAG, "Bookmark media refresh completed: ${resolvedItems.size} items for $bookmarkId")
                 }
-
-                // Resolve media items: merge new candidates with existing cached items
-                // Groups CDN size variants, selects the largest variant, and prioritizes video streams
-                val resolvedItems = if (newCandidates.isNotEmpty()) {
-                    val combined = newCandidates + current.items
-                    MediaNormalizer.deduplicateMediaInboxItems(combined, current.sourceUrl)
-                } else {
-                    // Preserve existing cached media if refresh returned empty
-                    current.items
-                }
-
-                val newPreview = when {
-                    meta.previewImageUrl.isNotBlank() -> meta.previewImageUrl
-                    resolvedItems.isNotEmpty() -> resolvedItems.firstOrNull { !it.isVideo }?.sourceUrl
-                        ?: resolvedItems.firstOrNull()?.sourceUrl
-                        ?: current.previewImageUrl
-                    else -> current.previewImageUrl
-                }
-
-                val cleanDomain = current.sourceDomain.ifBlank { meta.domain }
-                val isTitleDefault = current.title.isBlank() ||
-                    current.title.equals(cleanDomain, ignoreCase = true) ||
-                    current.title.equals(current.sourceUrl, ignoreCase = true) ||
-                    current.title == "Untitled Bookmark"
-
-                val updated = current.copy(
-                    title = if (isTitleDefault && meta.title.isNotBlank()) meta.title else current.title,
-                    description = if (current.description.isBlank() && meta.description.isNotBlank()) meta.description else current.description,
-                    previewImageUrl = if (newPreview.isNotBlank()) newPreview else current.previewImageUrl,
-                    sourceDomain = cleanDomain,
-                    items = resolvedItems
-                )
-                updateBookmark(updated)
-                Log.d(TAG, "Bookmark media refresh completed: ${resolvedItems.size} items for $bookmarkId")
             } catch (e: Exception) {
                 Log.e(TAG, "Error in fetchSiteMedia for bookmark $bookmarkId, preserving cached media", e)
             } finally {
@@ -871,20 +883,23 @@ class PocketRepository(
             existingItems = target.items,
             scope = coroutineScope,
             onIncrementalMediaDiscovered = { newCandidates ->
-                val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@startScan
-                val combined = newCandidates + current.items
-                val resolvedItems = MediaNormalizer.deduplicateMediaInboxItems(combined, current.sourceUrl).take(1000)
-                val newPreview = if (current.previewImageUrl.isBlank()) {
-                    resolvedItems.firstOrNull { !it.isVideo }?.sourceUrl
-                        ?: resolvedItems.firstOrNull()?.sourceUrl
-                        ?: ""
-                } else current.previewImageUrl
+                synchronized(bookmarkMutationLock) {
+                    // Merge against the newest bookmark state so Refresh and Deep Scan cannot overwrite each other.
+                    val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@synchronized
+                    val resolvedItems = MediaNormalizer.deduplicateMediaInboxItems(
+                        current.items + newCandidates,
+                        current.sourceUrl
+                    )
+                    val newPreview = if (current.previewImageUrl.isBlank()) {
+                        resolvedItems.firstOrNull { !it.isVideo && !it.isStream }?.sourceUrl
+                            ?: resolvedItems.firstOrNull()?.sourceUrl
+                            ?: ""
+                    } else current.previewImageUrl
 
-                val updated = current.copy(
-                    items = resolvedItems,
-                    previewImageUrl = newPreview
-                )
-                _bookmarks.value = _bookmarks.value.map { if (it.id == bookmarkId) updated else it }
+                    _bookmarks.value = _bookmarks.value.map {
+                        if (it.id == bookmarkId) current.copy(items = resolvedItems, previewImageUrl = newPreview) else it
+                    }
+                }
             },
             onCompleted = {
                 if (_activeDeepScanId.value == bookmarkId) {
@@ -914,6 +929,12 @@ class PocketRepository(
     }
 
     fun updateBookmark(updated: MediaInboxStack) {
+        synchronized(bookmarkMutationLock) {
+            updateBookmarkLocked(updated)
+        }
+    }
+
+    private fun updateBookmarkLocked(updated: MediaInboxStack) {
         val normalized = updated.copy(
             items = MediaNormalizer.deduplicateMediaInboxItems(updated.items, updated.sourceUrl)
         )
